@@ -158,26 +158,42 @@ class AgentState(TypedDict):
 
 ### 5.2 Result validation
 
-Deterministic checks run first. They are cheap and need no LLM call:
-1. **Empty result.** Extract equality and `IN` literals from the `WHERE` clause with `sqlglot`. For each one,
-   check whether the value exists in the column. If it doesn't, look up the nearest matches (`ILIKE` or
-   `pg_trgm` similarity) → F5.
-2. **Degenerate result.** For example, every value is NULL, or a single row of NULL from an aggregate.
-3. **Row explosion.** The query joins tables but returns implausibly many rows relative to the base table,
-   which usually means a missing join condition.
+Implemented in `app/agent/validation.py`. Deterministic checks run first. They are cheap and need no
+LLM call:
+1. **Effectively empty result**: no rows, or a single row of zeros/NULLs (what
+   `COALESCE(SUM(...), 0)` returns when the filter matched nothing).
+   - String literals compared with `=`, `IN`, `LIKE` or `ILIKE` are extracted with `sqlglot` and resolved
+     to their table (through aliases, or the unique table having that column).
+   - Each value is checked for existence. If it's missing, the 5 closest values by `pg_trgm` similarity
+     are suggested → F5. Example: "'USA' does not occur in country.country. Closest existing values:
+     'Ukraine', 'United States', …"
+2. **All-NULL result**: every value is NULL, which usually means a wrong join.
+3. *Row explosion* (planned, not built): joins returning implausibly many rows.
 
-If those pass, an **LLM judge** receives the question, the SQL, the column names and a few sample rows.
-It answers `{verdict: pass|fail, critique}`. An empty result can still pass if the judge agrees that
-"no rows" is a correct answer.
+If those pass, an **LLM judge** (`judge` group) receives:
+- the question and the SQL
+- the DDL of the tables the SQL references
+- a 10-row preview of the result
+- **filter matches**: for each `LIKE`/`ILIKE` filter, the distinct values it actually matched in the
+  database. Example: "`country.country LIKE '%uk%'` matched: 'Ukraine'". Without this, a pattern that hits
+  the wrong values returns a plausible non-zero result that neither the checks nor the judge can spot.
+
+The judge answers `{verdict: pass|fail, critique}`. It is told to fail only for clear problems and
+to pass when in doubt. An empty result can pass if "no matching data" is plausible. If the judge itself
+is unavailable, the result is accepted with a warning: the judge is a safety net, not a gate.
 
 ### 5.3 Loop rules
 - **3 attempts total.** An attempt is any generated SQL, whether it was rejected, errored, or failed
   validation.
-- SQL is normalized (parsed by `sqlglot`, then pretty-printed) and hashed. A duplicate is never executed
-  again.
-- If attempt 3 **executed** but failed only the LLM judge, show the result as a **best-effort answer with a
-  visible warning** rather than discarding it.
-- If attempt 3 failed outright, run `explain_failure`.
+- SQL is normalized (parsed and re-rendered by `sqlglot` with identifiers lowercased). A duplicate is never
+  executed again; it counts as a failed attempt with feedback.
+- Every retry prompt lists all previous attempts: SQL, status, and the error or critique.
+- Undefined-column/table errors get the real column list of the referenced tables appended. Timeouts get
+  "simplify the query" advice.
+- If the last attempt **executed** but failed validation, the result is shown as a **best-effort answer**,
+  with the reviewer's note passed (delimited) to `compose_answer` so the answer carries a warning.
+- If the last attempt failed outright, `finish_failure` returns a templated explanation of each attempt.
+- Graph code: `app/agent/graph.py`. The CLI (`python -m app.ask`) prints the full attempt trace.
 
 ### 5.4 LLM call budget per question (free-tier critical)
 
@@ -340,19 +356,74 @@ All LLM calls go through one function, `app.llm.client.call(group, messages, sch
 
 **Purpose:** measure, compare, and prove. It doesn't change runtime behavior.
 
-- The eval runs against the **Pagila sample**, loaded as dataset `pagila` from `sample_data/pagila/`
-  through the normal loader. The runner checks that it's loaded and tells you the load command if not.
-- `eval/questions.yaml` holds about 40 questions with **gold SQL**, tagged by difficulty (easy, join,
-  aggregate+filter, ambiguous-literal, date logic) and by **expected tables** (for retrieval recall).
-- `eval/run_eval.py --embedder local|gemini|none --max-attempts 1|3`:
-  - **Execution accuracy**: the bot's result set equals the gold result set (order-insensitive unless the
-    question asks for an order).
-  - **First-try accuracy** vs **final accuracy**, which shows the value of the self-correction loop.
-  - **Recovery rate**: of the questions that failed on the first try, the % fixed by retries.
-  - **Avg attempts**, **avg LLM calls**, **p50/p95 latency**.
-  - **Table recall@k** for each embedder.
-- Output: a markdown report in `eval/reports/`. The headline numbers go in the README.
-- A rate-limit-friendly mode adds a configurable delay between questions.
+- **Dataset**: the **Pagila sample**, loaded as dataset `pagila` from `sample_data/pagila/` through the
+  normal loader. The runner checks that it's loaded and prints the load command if not.
+- **Questions**: `eval/questions.yaml` holds **40 questions with gold SQL**.
+  - Tags: easy, filter, literal, join, multi_join, aggregate, ranking, date, null, subquery.
+  - Each question lists the **expected tables**, for retrieval recall in M4.
+  - Every gold query was executed and checked for empty results and ranking ties before use. Three
+    questions were rewritten because of this: a city that doesn't exist, a tie for the top category,
+    and a tie at 5th place.
+  - Literal questions target real spelling traps in the data: "UK" vs `United Kingdom`, "sci-fi" vs
+    `Sci-Fi`, "PG 13" vs `PG-13`, "Varanasi" vs `Varanasi (Benares)`.
+- **Scoring** (`eval/scoring.py`) is execution accuracy, lenient on presentation and strict on content:
+  - Column names, column order and extra columns don't matter.
+  - Every gold column must match a bot column value-for-value, with rows aligned.
+  - Numbers are rounded to 2 decimals; text compares case-insensitively.
+  - A split first/last name matches a joined full name, in either direction.
+  - Row order is checked only for questions marked `order_matters`.
+- **Runner**: `python -m eval.run_eval [--ids q01,q02] [--tags literal] [--max-attempts N] [--delay S]`.
+  - The answer step is skipped to save quota.
+  - On an `llm_error` (all providers rate-limited), it waits 60 s and retries the question once.
+  - Writes `eval/reports/<timestamp>_<label>.md` and `.json`.
+- **Metrics from a single run**: the agent keeps the result of every rejected attempt, so attempt 1 can be
+  scored on its own.
+  - **Accuracy** (with self-correction).
+  - **Single-shot accuracy**: attempt 1 alone, i.e. M2 behavior, without a second run.
+  - **Recovery rate**: of the questions wrong on attempt 1, the share that ended up right.
+  - **Broken by retry**: right on attempt 1, wrong in the end.
+  - **Validator rejections**, and how many rejected results were actually correct (false rejections).
+  - Avg attempts, avg LLM calls, fallback calls, p50/p95 latency, accuracy by tag.
+
+### Results (M3 baseline, 2026-10-31)
+
+Full schema in the prompt (no retrieval yet), `gpt-oss-120b` generator, `gpt-oss-20b` judge, max 3
+attempts. Report: `eval/reports/20261031-0140_baseline-m3.md`.
+
+| Metric | Value |
+|---|---|
+| **Accuracy with self-correction** | **40/40 (100%)** |
+| Single-shot accuracy (attempt 1) | 36/40 (90%) |
+| Recovery rate | 4/4 (100%) |
+| Broken by retry | 0 |
+| Validator rejections / false rejections | 4 / 0 |
+| Avg attempts · avg LLM calls | 1.1 · 2.1 (answer step skipped) |
+| Latency p50 / p95 | 2.1 s / 65 s (p95 is the 60 s free-tier rate-limit wait) |
+
+The four recoveries:
+- **q08 "UK"**: `ILIKE 'uk'`; the reviewer flagged it and the retry used `United Kingdom`.
+- **q13 "Varanasi"**: the stored value is `Varanasi (Benares)`; the value check suggested it.
+- **q26 "USA"**: the stored value is `United States`.
+- **q38 "more than 80 films"**: attempt 1 counted distinct films; the reviewer pushed it to count rentals.
+
+**How to read this honestly:**
+- **Before the run**, the first full run scored 37/40 and exposed three issues, all fixed before this
+  run:
+  - **q15 (prompt bug, fixed in the agent)**: superlative questions returned the whole ranking. The
+    generator prompt now asks for only the top row(s), keeping ties (`RANK() = 1` / `MAX`), not
+    `LIMIT 1`.
+  - **q08 (validator gap, fixed in the agent)**: `ILIKE '%uk%'` matched *Ukraine* and passed both checks.
+    The judge now sees which values each pattern filter actually matched.
+  - **q40 (ambiguous question, fixed in the eval)**: "average amount a customer has paid" fits averaging
+    over all customers or only paying ones. The question was made precise. Ambiguity is M5's job, not
+    the eval's.
+- Two of those fixes were made after seeing failures on these same questions, so 40/40 is an optimistic
+  in-sample number. A held-out question set (planned with M4) will give a fairer one.
+- 40 questions on a ~15-table schema is a small benchmark. Single runs also vary, because LLM output is
+  not fully deterministic even at temperature 0.
+- The headline result is the **gap** between single-shot (90%) and self-correcting (100%): every
+  first-attempt failure was recovered, and no correct first attempt was broken.
+
 
 ## 11. Observability
 
@@ -373,17 +444,16 @@ text-to-sql-bot/
 ├── app/
 │   ├── config.py
 │   ├── llm/        client.py (LiteLLM Router + call()), prompts.py, result_format.py
-│   ├── pipeline.py # M2 single-shot pipeline (replaced by agent/ in M3)
+│   ├── agent/      graph.py (LangGraph agent + run_agent), state.py, validation.py
 │   ├── ask.py      # CLI: python -m app.ask --dataset <slug> "question"
 │   ├── database/   connection.py, executor.py, safety.py, catalog.py
 │   ├── retrieval/  embedders.py, indexer.py, retriever.py
 │   ├── datasets/   registry.py, dump_parser.py, loader.py, cli.py
 │   │               + tabular_loader.py, relationships.py, describer.py  (M7)
-│   ├── agent/      state.py, graph.py, nodes/*.py
 │   ├── charts.py
 │   └── ui/streamlit_app.py
 ├── scripts/build_index.py
-├── eval/       questions.yaml, run_eval.py, reports/
+├── eval/       questions.yaml, scoring.py, run_eval.py, reports/
 └── docs/DESIGN.md
 ```
 
@@ -393,7 +463,7 @@ text-to-sql-bot/
 |---|---|---|
 | M1 | **DB foundation + dump loading** ✅ | `docker compose up` brings up an empty server with the three roles; `app.datasets.cli load` restores a plain-SQL Postgres dump (e.g. the Pagila sample) as an isolated dataset with sensitive columns hidden; malicious dumps are rejected and leave nothing behind; `bot_reader` can only SELECT exposed columns; safety checker blocks malicious queries |
 | M2 | **Single-shot pipeline** ✅ | LiteLLM Router (Groq→Gemini, rpm/tpm limits, verified fallback); schema catalog rendered as DDL from what `bot_reader` can see; `python -m app.ask` runs question → SQL → safety → execute → answer using the full schema |
-| M3 | **Agentic loop + eval harness** | LangGraph graph with validator, feedback, dedupe, 3 attempts, give-up; eval set written; first numbers: `--max-attempts 1` vs `3` |
+| M3 | **Agentic loop + eval harness** ✅ | LangGraph graph with deterministic validation + LLM judge, feedback, dedupe, 3 attempts, best-effort/give-up; 40-question eval set with verified gold SQL; first numbers (single-shot vs self-correcting) in Section 10 |
 | M4 | **Retrieval** | Catalog + descriptions + both embedders + pgvector index; recall@k comparison report; embedder chosen |
 | M5 | **Clarification** | Ambiguous and out-of-scope handling with `interrupt()` |
 | M6 | **Streamlit UI** | Chat, table, SQL, trace, charts, sidebar settings |

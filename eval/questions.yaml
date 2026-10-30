@@ -1,0 +1,363 @@
+# Evaluation questions for the Pagila sample dataset (load it as slug `pagila`).
+#
+# Each gold_sql returns only the values that define a correct answer. The bot may return extra
+# columns (ids, helper columns) and different column names; see eval/scoring.py.
+#
+# fields:
+#   id, question, gold_sql
+#   tags: easy | filter | literal | join | aggregate | date | nulls | subquery | ranking | multi_join
+#   tables: tables a correct query needs (for retrieval recall@k in M4)
+#   order_matters: compare rows in order (only when the question asks for a ranking order)
+
+questions:
+  # ---------------------------------------------------------------- easy
+  - id: q01
+    question: How many films are in the catalog?
+    gold_sql: SELECT count(*) FROM film
+    tags: [easy]
+    tables: [film]
+
+  - id: q02
+    question: How many actors are there?
+    gold_sql: SELECT count(*) FROM actor
+    tags: [easy]
+    tables: [actor]
+
+  - id: q03
+    question: What is the average rental rate of a film?
+    gold_sql: SELECT round(avg(rental_rate), 2) FROM film
+    tags: [easy, aggregate]
+    tables: [film]
+
+  - id: q04
+    question: Which films have the longest running time?
+    gold_sql: SELECT title FROM film WHERE length = (SELECT max(length) FROM film)
+    tags: [easy, subquery]
+    tables: [film]
+
+  - id: q05
+    question: How many films are rated PG-13?
+    gold_sql: SELECT count(*) FROM film WHERE rating = 'PG-13'
+    tags: [easy, filter]
+    tables: [film]
+
+  - id: q06
+    question: How many films can be rented for 99 cents?
+    gold_sql: SELECT count(*) FROM film WHERE rental_rate = 0.99
+    tags: [easy, filter]
+    tables: [film]
+
+  # ---------------------------------------------------------------- filters & literals
+  - id: q07
+    question: How many customers live in Canada?
+    gold_sql: |
+      SELECT count(*) FROM customer cu
+      JOIN address a ON a.address_id = cu.address_id
+      JOIN city ci ON ci.city_id = a.city_id
+      JOIN country co ON co.country_id = ci.country_id
+      WHERE co.country = 'Canada'
+    tags: [filter, multi_join]
+    tables: [customer, address, city, country]
+
+  - id: q08
+    question: How many customers are from the UK?
+    gold_sql: |
+      SELECT count(*) FROM customer cu
+      JOIN address a ON a.address_id = cu.address_id
+      JOIN city ci ON ci.city_id = a.city_id
+      JOIN country co ON co.country_id = ci.country_id
+      WHERE co.country = 'United Kingdom'
+    tags: [literal, multi_join]
+    tables: [customer, address, city, country]
+
+  - id: q09
+    question: How many films are in the sci-fi category?
+    gold_sql: |
+      SELECT count(*) FROM film_category fc
+      JOIN category c ON c.category_id = fc.category_id
+      WHERE c.name = 'Sci-Fi'
+    tags: [literal, join]
+    tables: [film_category, category]
+
+  - id: q10
+    question: How many films are rated "PG 13"?
+    gold_sql: SELECT count(*) FROM film WHERE rating = 'PG-13'
+    tags: [literal]
+    tables: [film]
+
+  - id: q11
+    question: Which films did Penelope Guiness act in?
+    gold_sql: |
+      SELECT f.title FROM film f
+      JOIN film_actor fa ON fa.film_id = f.film_id
+      JOIN actor a ON a.actor_id = fa.actor_id
+      WHERE a.first_name = 'PENELOPE' AND a.last_name = 'GUINESS'
+    tags: [literal, multi_join]
+    tables: [film, film_actor, actor]
+
+  - id: q12
+    question: How many films include deleted scenes as a special feature?
+    gold_sql: SELECT count(*) FROM film WHERE 'Deleted Scenes' = ANY(special_features)
+    tags: [literal, filter]
+    tables: [film]
+
+  - id: q13
+    question: How many customers live in Varanasi?
+    # stored as 'Varanasi (Benares)'
+    gold_sql: |
+      SELECT count(*) FROM customer cu
+      JOIN address a ON a.address_id = cu.address_id
+      JOIN city ci ON ci.city_id = a.city_id
+      WHERE ci.city = 'Varanasi (Benares)'
+    tags: [literal, multi_join]
+    tables: [customer, address, city]
+
+  # ---------------------------------------------------------------- joins & aggregates
+  - id: q14
+    question: How many films does each category have?
+    gold_sql: |
+      SELECT c.name, count(*) FROM category c
+      JOIN film_category fc ON fc.category_id = c.category_id
+      GROUP BY c.name
+    tags: [join, aggregate]
+    tables: [category, film_category]
+
+  - id: q15
+    question: Which film categories have the most films?
+    # Music and Drama tie at 152
+    gold_sql: |
+      SELECT c.name FROM category c
+      JOIN film_category fc ON fc.category_id = c.category_id
+      GROUP BY c.name
+      HAVING count(*) = (SELECT max(n) FROM (SELECT count(*) AS n FROM film_category GROUP BY category_id) m)
+    tags: [join, ranking]
+    tables: [category, film_category]
+
+  - id: q16
+    question: What is the average film length for each rating?
+    gold_sql: SELECT rating, round(avg(length), 2) FROM film GROUP BY rating
+    tags: [aggregate]
+    tables: [film]
+
+  - id: q17
+    question: Which countries have more than 30 customers?
+    gold_sql: |
+      SELECT co.country FROM customer cu
+      JOIN address a ON a.address_id = cu.address_id
+      JOIN city ci ON ci.city_id = a.city_id
+      JOIN country co ON co.country_id = ci.country_id
+      GROUP BY co.country HAVING count(*) > 30
+    tags: [aggregate, multi_join]
+    tables: [customer, address, city, country]
+
+  - id: q18
+    question: Which city has the most customers?
+    gold_sql: |
+      SELECT ci.city FROM customer cu
+      JOIN address a ON a.address_id = cu.address_id
+      JOIN city ci ON ci.city_id = a.city_id
+      GROUP BY ci.city ORDER BY count(*) DESC LIMIT 1
+    tags: [ranking, multi_join]
+    tables: [customer, address, city]
+
+  - id: q19
+    question: Who are the top 5 customers by total amount paid?
+    gold_sql: |
+      SELECT cu.first_name, cu.last_name, sum(p.amount) FROM customer cu
+      JOIN payment p ON p.customer_id = cu.customer_id
+      GROUP BY cu.customer_id, cu.first_name, cu.last_name
+      ORDER BY sum(p.amount) DESC LIMIT 5
+    order_matters: true
+    tags: [ranking, join, aggregate]
+    tables: [customer, payment]
+
+  - id: q20
+    question: Which 3 customers made the most rentals?
+    gold_sql: |
+      SELECT cu.first_name, cu.last_name, count(*) FROM customer cu
+      JOIN rental r ON r.customer_id = cu.customer_id
+      GROUP BY cu.customer_id, cu.first_name, cu.last_name
+      ORDER BY count(*) DESC LIMIT 3
+    tags: [ranking, join, aggregate]
+    tables: [customer, rental]
+
+  - id: q21
+    question: How many films are there in each MPAA rating?
+    gold_sql: SELECT rating, count(*) FROM film GROUP BY rating
+    tags: [aggregate]
+    tables: [film]
+
+  - id: q22
+    question: Which language are most films in?
+    gold_sql: |
+      SELECT l.name FROM film f JOIN language l ON l.language_id = f.language_id
+      GROUP BY l.name ORDER BY count(*) DESC LIMIT 1
+    tags: [join, ranking]
+    tables: [film, language]
+
+  # ---------------------------------------------------------------- revenue (multi-join)
+  - id: q23
+    question: Which film category generated the most revenue?
+    gold_sql: |
+      SELECT c.name FROM payment p
+      JOIN rental r ON r.rental_id = p.rental_id
+      JOIN inventory i ON i.inventory_id = r.inventory_id
+      JOIN film_category fc ON fc.film_id = i.film_id
+      JOIN category c ON c.category_id = fc.category_id
+      GROUP BY c.name ORDER BY sum(p.amount) DESC LIMIT 1
+    tags: [multi_join, ranking]
+    tables: [payment, rental, inventory, film_category, category]
+
+  - id: q24
+    question: How much revenue did the Animation category make?
+    gold_sql: |
+      SELECT sum(p.amount) FROM payment p
+      JOIN rental r ON r.rental_id = p.rental_id
+      JOIN inventory i ON i.inventory_id = r.inventory_id
+      JOIN film_category fc ON fc.film_id = i.film_id
+      JOIN category c ON c.category_id = fc.category_id
+      WHERE c.name = 'Animation'
+    tags: [multi_join, aggregate]
+    tables: [payment, rental, inventory, film_category, category]
+
+  - id: q25
+    question: What are the 3 most rented films?
+    gold_sql: |
+      SELECT f.title, count(*) FROM rental r
+      JOIN inventory i ON i.inventory_id = r.inventory_id
+      JOIN film f ON f.film_id = i.film_id
+      GROUP BY f.film_id, f.title ORDER BY count(*) DESC LIMIT 3
+    tags: [multi_join, ranking]
+    tables: [rental, inventory, film]
+
+  - id: q26
+    question: How much did customers from the USA pay in total?
+    gold_sql: |
+      SELECT sum(p.amount) FROM payment p
+      JOIN customer cu ON cu.customer_id = p.customer_id
+      JOIN address a ON a.address_id = cu.address_id
+      JOIN city ci ON ci.city_id = a.city_id
+      JOIN country co ON co.country_id = ci.country_id
+      WHERE co.country = 'United States'
+    tags: [literal, multi_join, aggregate]
+    tables: [payment, customer, address, city, country]
+
+  - id: q27
+    question: How many different films have been rented by customers living in Canada?
+    gold_sql: |
+      SELECT count(DISTINCT i.film_id) FROM rental r
+      JOIN inventory i ON i.inventory_id = r.inventory_id
+      JOIN customer cu ON cu.customer_id = r.customer_id
+      JOIN address a ON a.address_id = cu.address_id
+      JOIN city ci ON ci.city_id = a.city_id
+      JOIN country co ON co.country_id = ci.country_id
+      WHERE co.country = 'Canada'
+    tags: [multi_join]
+    tables: [rental, inventory, customer, address, city, country]
+
+  - id: q28
+    question: Which actors appeared in more than 5 Children films?
+    gold_sql: |
+      SELECT a.first_name, a.last_name FROM actor a
+      JOIN film_actor fa ON fa.actor_id = a.actor_id
+      JOIN film_category fc ON fc.film_id = fa.film_id
+      JOIN category c ON c.category_id = fc.category_id
+      WHERE c.name = 'Children'
+      GROUP BY a.actor_id, a.first_name, a.last_name HAVING count(*) > 5
+    tags: [multi_join, aggregate]
+    tables: [actor, film_actor, film_category, category]
+
+  # ---------------------------------------------------------------- dates
+  - id: q29
+    question: How much revenue was collected in 2024?
+    gold_sql: |
+      SELECT sum(amount) FROM payment
+      WHERE payment_date >= '2024-01-01' AND payment_date < '2025-01-01'
+    tags: [date, aggregate]
+    tables: [payment]
+
+  - id: q30
+    question: How many rentals happened in March 2025?
+    gold_sql: |
+      SELECT count(*) FROM rental
+      WHERE rental_date >= '2025-03-01' AND rental_date < '2025-04-01'
+    tags: [date]
+    tables: [rental]
+
+  - id: q31
+    question: How many customers signed up in 2023?
+    gold_sql: SELECT count(*) FROM customer WHERE create_date >= '2023-01-01' AND create_date < '2024-01-01'
+    tags: [date]
+    tables: [customer]
+
+  - id: q32
+    question: How many rentals were there in each month of 2023?
+    # Only the counts: month labels can legitimately be dates, numbers or names.
+    gold_sql: |
+      SELECT count(*) FROM rental
+      WHERE rental_date >= '2023-01-01' AND rental_date < '2024-01-01'
+      GROUP BY date_trunc('month', rental_date)
+    tags: [date, aggregate]
+    tables: [rental]
+
+  - id: q33
+    question: What was the total payment amount in each year?
+    gold_sql: SELECT sum(amount) FROM payment GROUP BY date_trunc('year', payment_date)
+    tags: [date, aggregate]
+    tables: [payment]
+
+  # ---------------------------------------------------------------- nulls & subqueries
+  - id: q34
+    question: How many rentals have not been returned yet?
+    gold_sql: SELECT count(*) FROM rental WHERE return_date IS NULL
+    tags: [nulls]
+    tables: [rental]
+
+  - id: q35
+    question: How many films have never been rented?
+    gold_sql: |
+      SELECT count(*) FROM film f
+      WHERE NOT EXISTS (SELECT 1 FROM inventory i JOIN rental r ON r.inventory_id = i.inventory_id
+                        WHERE i.film_id = f.film_id)
+    tags: [subquery, nulls]
+    tables: [film, inventory, rental]
+
+  - id: q36
+    question: How many films have a rental rate above the average rental rate?
+    gold_sql: SELECT count(*) FROM film WHERE rental_rate > (SELECT avg(rental_rate) FROM film)
+    tags: [subquery]
+    tables: [film]
+
+  - id: q37
+    question: How many customers have spent more than 200 dollars in total?
+    gold_sql: |
+      SELECT count(*) FROM (
+        SELECT customer_id FROM payment GROUP BY customer_id HAVING sum(amount) > 200) t
+    tags: [subquery, aggregate]
+    tables: [payment]
+
+  - id: q38
+    question: Which customers have rented more than 80 films?
+    gold_sql: |
+      SELECT cu.first_name, cu.last_name FROM customer cu
+      JOIN rental r ON r.customer_id = cu.customer_id
+      GROUP BY cu.customer_id, cu.first_name, cu.last_name HAVING count(*) > 80
+    tags: [join, aggregate]
+    tables: [customer, rental]
+
+  - id: q39
+    question: How many films are not in stock at any store?
+    gold_sql: |
+      SELECT count(*) FROM film f
+      WHERE NOT EXISTS (SELECT 1 FROM inventory i WHERE i.film_id = f.film_id)
+    tags: [subquery, nulls]
+    tables: [film, inventory]
+
+  - id: q40
+    question: Among customers who have made at least one payment, what is the average total amount paid per customer?
+    # Rephrased: the original wording also fits averaging over all customers (non-payers as 0).
+    gold_sql: |
+      SELECT round(avg(total), 2) FROM (
+        SELECT customer_id, sum(amount) AS total FROM payment GROUP BY customer_id) t
+    tags: [subquery, aggregate]
+    tables: [payment]
