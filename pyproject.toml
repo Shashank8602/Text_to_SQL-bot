@@ -7,3 +7,6 @@ requires-python = ">=3.11"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["llm: calls real LLM providers (uses API quota); run with -m llm"]
+addopts = "-m 'not llm'"
+filterwarnings = ["ignore::DeprecationWarning", "ignore:.*ReadOnly.*:UserWarning"]
