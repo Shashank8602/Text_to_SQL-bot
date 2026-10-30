@@ -269,33 +269,49 @@ Defense in depth. Each layer assumes the one before it failed.
 
 ## 8. LLM Layer
 
-All LLM calls go through a **LiteLLM `Router`**, used in-process as a Python SDK. No separate proxy
-container is needed.
+All LLM calls go through one function, `app.llm.client.call(group, messages, schema)`, backed by a
+**LiteLLM `Router`** used in-process as a Python SDK. No separate proxy container is needed.
 
-- **Model groups**, configured in `app/llm/router.yaml` (model names come from `.env`):
-  - `generator` → Groq large model, with Gemini fallback. Used by `understand_question`, `generate_sql`,
-    and `compose_answer`.
-  - `judge` → Groq small/fast model, with Gemini fallback. Used by `validate_result`, which saves quota.
-- **Free-tier protection**: each deployment gets `rpm`/`tpm` limits that match its free tier, so the router
-  routes around a provider before hitting a 429. It also uses `num_retries` with backoff and, after
-  repeated failures, a `cooldown_time` that takes a rate-limited deployment out of rotation temporarily.
-  `fallbacks` switch to Gemini when Groq is exhausted.
-- **Structured output**: Pydantic schemas are passed as `response_format`. The response is validated with
-  Pydantic, and a parse failure gets one repair retry. Check JSON-schema support per model at build time
-  (`litellm.supports_response_schema`).
-- `temperature=0` on all calls.
-- **Tracing**: the thin wrapper `llm.call(group, messages, schema)` is decorated with LangSmith
-  `@traceable(run_type="llm")`, so LLM calls nest under their LangGraph node in the trace.
-- The deployment actually used (`response._hidden_params` / model name) is recorded on each attempt and
-  shown in the trace, so a Groq → Gemini fallback is visible.
-- Gemini embeddings (Section 6.3) can also go through `litellm.embedding`, which keeps one client for all
+- **Model groups** (built in `app/llm/client.py` from settings; all model names overridable in `.env`):
+
+  | Group | Primary (Groq) | Fallback (Gemini) | Used by |
+  |---|---|---|---|
+  | `generator` | `groq/openai/gpt-oss-120b` | `gemini/gemini-3.5-flash` | `understand_question`, `generate_sql`, `compose_answer` |
+  | `judge` | `groq/openai/gpt-oss-20b` | `gemini/gemini-3.5-flash-lite` | `validate_result` (M3) |
+
+  Chosen on 2026-10-31 from the providers' live model lists and a test of each candidate.
+  `gemini-2.5-flash` is retired, and `gemini-3.8-flash` timed out on the free tier.
+- **Free-tier protection**: `routing_strategy="usage-based-routing-v2"` with per-deployment limits. Groq
+  reports **1,000 requests/day** and **8,000 tokens/min** per model, so the config uses `rpm=30` and
+  `tpm=7000` for headroom. Gemini gets `rpm=10`.
+  - Verified: once a deployment's token usage in the current minute exceeds its `tpm`, the next call
+    goes straight to the fallback, with no 429. The check counts *past* usage, so the call that crosses
+    the limit still goes through.
+  - Usage counters are **per process**. The Streamlit app and the eval runner are single long-lived
+    processes. Across separate CLI runs, a real 429 from Groq also triggers the fallback.
+  - `num_retries=0`: a rate-limited provider is never retried, the call falls back instead.
+    `allowed_fails=1` and `cooldown_time=60` take a failing deployment out of rotation for a minute.
+- **Structured output**: Pydantic schemas are passed as `response_format` (JSON schema mode), and replies
+  are validated with Pydantic. A reply that fails validation gets one repair round, then raises `LLMError`.
+  - Measured on Groq: schema mode was 5/5 reliable for all three candidate models with realistic
+    prompts. A trivial prompt made `gpt-oss-20b` fail Groq's server-side JSON check
+    (`json_validate_failed`), which the router handled by falling back to Gemini.
+- **Sampling**: `temperature=0` on Groq. Gemini 3+ deprecates sampling parameters, so none are sent.
+- **Fallback visibility**: each call returns the deployment that actually answered (from
+  `response._hidden_params["model_id"]`) and a `fell_back` flag, shown in the CLI output and later in the
+  trace.
+- **Tracing** (M8): `call()` gets LangSmith `@traceable(run_type="llm")`, so LLM calls nest under their
+  LangGraph node.
+- Gemini embeddings (Section 6.3) can also go through `litellm.embedding`, keeping one client for all
   remote AI calls.
-- **Supply chain**: pin `litellm` to an exact version, preferably in a hashed lockfile (`uv lock` /
-  `pip-compile --generate-hashes`). It is a fast-moving dependency with a large footprint.
-- **Result payload to the LLM**: column names and types, total row count, the first 20 rows, and min/max/avg
-  for numeric columns. Never the full result.
-- `compose_answer` is instructed to use **only numbers present in the result payload**. The answer must not
-  invent figures.
+- **Supply chain**: `litellm` is pinned to an exact version that had been public for at least a week
+  when chosen (`1.106.2`, released 2026-10-21). Move to a hashed lockfile once dependencies settle.
+- **Result payload to the LLM** (`app/llm/result_format.py`): column names and types, total row count
+  (flagged if truncated), the first 20 rows, and min/max/sum/avg for numeric columns when rows were left
+  out. ID-like and year columns are excluded from statistics. Never the full result.
+- `compose_answer` is instructed to use **only numbers present in the result payload**.
+- **Refusals**: `generate_sql` may return an empty `sql` with an explanation (e.g. for "delete all
+  payments"). The pipeline reports this as `declined`; M5 moves it up front into `understand_question`.
 
 ## 9. Streamlit UI
 
@@ -356,7 +372,9 @@ text-to-sql-bot/
 ├── sample_data/pagila/         # sample dataset to load like any upload: pagila.sql.gz, descriptions.yaml
 ├── app/
 │   ├── config.py
-│   ├── llm/        client.py (LiteLLM Router wrapper), router.yaml, prompts.py, schemas.py
+│   ├── llm/        client.py (LiteLLM Router + call()), prompts.py, result_format.py
+│   ├── pipeline.py # M2 single-shot pipeline (replaced by agent/ in M3)
+│   ├── ask.py      # CLI: python -m app.ask --dataset <slug> "question"
 │   ├── database/   connection.py, executor.py, safety.py, catalog.py
 │   ├── retrieval/  embedders.py, indexer.py, retriever.py
 │   ├── datasets/   registry.py, dump_parser.py, loader.py, cli.py
@@ -374,7 +392,7 @@ text-to-sql-bot/
 | # | Milestone | Done when |
 |---|---|---|
 | M1 | **DB foundation + dump loading** ✅ | `docker compose up` brings up an empty server with the three roles; `app.datasets.cli load` restores a plain-SQL Postgres dump (e.g. the Pagila sample) as an isolated dataset with sensitive columns hidden; malicious dumps are rejected and leave nothing behind; `bot_reader` can only SELECT exposed columns; safety checker blocks malicious queries |
-| M2 | **Single-shot pipeline** | LiteLLM Router (Groq→Gemini, rpm limits); question → SQL → execute → answer works from a script, using the full schema |
+| M2 | **Single-shot pipeline** ✅ | LiteLLM Router (Groq→Gemini, rpm/tpm limits, verified fallback); schema catalog rendered as DDL from what `bot_reader` can see; `python -m app.ask` runs question → SQL → safety → execute → answer using the full schema |
 | M3 | **Agentic loop + eval harness** | LangGraph graph with validator, feedback, dedupe, 3 attempts, give-up; eval set written; first numbers: `--max-attempts 1` vs `3` |
 | M4 | **Retrieval** | Catalog + descriptions + both embedders + pgvector index; recall@k comparison report; embedder chosen |
 | M5 | **Clarification** | Ambiguous and out-of-scope handling with `interrupt()` |

@@ -2,5 +2,8 @@
 psycopg[binary]==3.3.6
 pydantic==2.14.2
 pydantic-settings==2.16.2
+python-dotenv==1.2.4
 sqlglot==30.27.0
+# Pinned to a release that had been public for 10 days when chosen (2026-10-21); bump deliberately.
+litellm==1.106.2
 pytest==9.2.0
