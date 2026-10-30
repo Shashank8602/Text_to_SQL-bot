@@ -3,7 +3,7 @@
 Ask questions about your own data in plain English. An LLM writes the SQL, and when the query fails or
 returns a wrong-looking result, the agent feeds the failure back and retries.
 
-Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **M2 (single-shot question → SQL → answer) complete**; the self-correcting agent loop is next (M3)
+Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **M3 (self-correcting agent + evaluation) complete**; schema retrieval is next (M4)
 
 ## Quickstart
 
@@ -38,9 +38,28 @@ To load your own database, export it with
 .venv/Scripts/python -m app.ask --dataset pagila "Which film category earned the most revenue?"
 ```
 
-It prints the LLM's plan, the SQL, a preview of the result, the answer, and which model answered each
-step (Groq, or Gemini when Groq is rate-limited). Free API keys:
+It prints the agent trace (each attempt, and why a failed one was rejected), the final SQL, a preview of
+the result, the answer, and which model answered each step (Groq, or Gemini when Groq is rate-limited).
+A failed attempt is fed back to the LLM with the error or the reviewer's critique, up to 3 attempts. Free API keys:
 [Groq](https://console.groq.com/keys) and [Gemini](https://aistudio.google.com/apikey).
+
+## Evaluation
+
+40 questions on the Pagila sample, with hand-verified gold SQL ([eval/questions.yaml](eval/questions.yaml)):
+
+| | Accuracy |
+|---|---|
+| Single-shot (first attempt only) | 36/40 (90%) |
+| **With self-correction (up to 3 attempts)** | **40/40 (100%)** |
+
+All 4 first-attempt failures were recovered (e.g. "UK" → `United Kingdom` after the first query matched
+Ukraine), and no correct first attempt was broken. See
+[DESIGN.md §10](docs/DESIGN.md#10-evaluation-suite) for the caveats.
+
+```bash
+.venv/Scripts/python -m eval.run_eval                 # needs the Pagila sample loaded as 'pagila'
+.venv/Scripts/python -m eval.run_eval --ids q08,q13 --delay 0
+```
 
 ## Tests
 

@@ -30,8 +30,9 @@ with warnings.catch_warnings():
 litellm.suppress_debug_info = True
 # LiteLLM builds some pydantic types lazily on first call; this warning is about its internals.
 warnings.filterwarnings("ignore", message=".*ReadOnly.*", category=UserWarning)
-logging.getLogger("LiteLLM").setLevel(logging.ERROR)
-logging.getLogger("LiteLLM Router").setLevel(logging.ERROR)
+# Provider failures surface as LLMError from call(); LiteLLM's own error logs are just noise.
+logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
+logging.getLogger("LiteLLM Router").setLevel(logging.CRITICAL)
 
 Group = Literal["generator", "judge"]
 T = TypeVar("T", bound=BaseModel)
