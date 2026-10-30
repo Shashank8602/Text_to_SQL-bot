@@ -1,0 +1,4 @@
+# Shell scripts run inside the Linux container; CRLF would break them.
+*.sh text eol=lf
+*.sql text eol=lf
+*.gz binary

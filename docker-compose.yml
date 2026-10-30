@@ -1,0 +1,27 @@
+services:
+  db:
+    image: pgvector/pgvector:pg18   # PG18 + pgvector (sample Pagila needs PG18: uuidv7, virtual columns)
+    container_name: texttosql-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: app
+      BOT_READER_PASSWORD: ${BOT_READER_PASSWORD:?set BOT_READER_PASSWORD in .env}
+      RAG_WRITER_PASSWORD: ${RAG_WRITER_PASSWORD:?set RAG_WRITER_PASSWORD in .env}
+      DATA_LOADER_PASSWORD: ${DATA_LOADER_PASSWORD:?set DATA_LOADER_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # pg_isready alone passes while init scripts are still running; check the last
+      # object created by 01_setup.sh instead.
+      test: ["CMD-SHELL", "psql -U postgres -d app -tAc \"SELECT to_regclass('rag.datasets') IS NOT NULL\" | grep -q t"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  pgdata:

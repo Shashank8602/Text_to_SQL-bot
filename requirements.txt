@@ -1,0 +1,6 @@
+# Exact pins. Regenerate with hashes once the dependency set settles (DESIGN.md §8).
+psycopg[binary]==3.3.6
+pydantic==2.14.2
+pydantic-settings==2.16.2
+sqlglot==30.27.0
+pytest==9.2.0
