@@ -95,5 +95,7 @@ commit `.env`, `.venv/`, or generated eval artifacts other than the milestone's 
 
 See the table in DESIGN.md §13. Done: M1 (DB foundation + dump loading), M2 (single-shot pipeline),
 M3 (self-correcting agent + eval: 36/40 single-shot → 40/40), M4 (hybrid schema retrieval, local
-embedder), M5 (clarification / out-of-scope triage). On 2026-11-05 the owner authorised building the
-remaining milestones (M6 to M8) end to end without waiting for approval between them.
+embedder), M5 (clarification / out-of-scope triage), M6 (Streamlit UI), M7 (CSV/Excel/dump upload, auto
+descriptions), M8 (LangSmith, README, final eval: 40/40 main, 20/20 held-out). On 2026-11-05 the owner
+authorised building M5 to M8 end to end without waiting for approval between them. Next: M9 (optional
+scale-up), only on the owner's command.

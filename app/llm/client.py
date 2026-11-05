@@ -52,6 +52,28 @@ class LLMResult(Generic[T]):
     completion_tokens: int
 
 
+def _traced(fn):
+    """LangSmith run_type="llm" span (nests under the LangGraph node). A no-op unless
+    LANGSMITH_TRACING=true; tracing problems never break a call."""
+    try:
+        from langsmith import traceable
+    except ImportError:  # pragma: no cover
+        return fn
+    return traceable(run_type="llm", name="llm_call", process_inputs=_trace_inputs,
+                     process_outputs=_trace_outputs)(fn)
+
+
+def _trace_inputs(inputs: dict) -> dict:
+    return {"group": inputs.get("group"), "messages": inputs.get("messages"),
+            "schema": getattr(inputs.get("schema"), "__name__", None)}
+
+
+def _trace_outputs(out) -> dict:
+    return {"model": out.model, "fell_back": out.fell_back, "latency_ms": out.latency_ms,
+            "tokens": out.prompt_tokens + out.completion_tokens, "data": out.data.model_dump()}
+
+
+@_traced
 def call(group: Group, messages: list[dict], schema: type[T], *, router: Router | None = None) -> LLMResult[T]:
     """Call a model group and parse its reply into `schema`.
 

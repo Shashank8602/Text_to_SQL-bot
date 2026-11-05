@@ -458,10 +458,47 @@ The four recoveries:
 - The headline result is the **gap** between single-shot (90%) and self-correcting (100%): every
   first-attempt failure was recovered, and no correct first attempt was broken.
 
+### Results (M8, 2026-11-05)
+
+Retrieval (local embedder, k = 8, value matching, glossary) with the Pagila descriptions, question triage
+off (`understand=False`; the eval questions are precise), same models and 3 attempts. Reports:
+`eval/reports/20261105-1752_m8-main.md` and `20261105-1802_m8-heldout.md`.
+
+| Metric | Main (40) | Held-out (20) |
+|---|---|---|
+| **Accuracy with self-correction** | **40/40 (100%)** | **20/20 (100%)** |
+| Single-shot accuracy (attempt 1) | 39/40 (98%) | 20/20 (100%) |
+| Recovery rate | 1/1 | n/a |
+| Broken by retry | 0 | 0 |
+| Validator rejections / false rejections | 1 / 0 | 3 / 3 |
+| Avg attempts · avg LLM calls | 1.02 · 2.02 | 1.1 · 2.2 |
+| Retrieval coverage · avg tables sent | 38/40 · 8.7 | 20/20 · 9.0 |
+| Fallback (Gemini) calls | 11 | 4 |
+| Latency p50 / p95 | 2.9 s / 69 s | 2.7 s / 68 s |
+
+How to read this:
+- **Retrieval did not cost accuracy.** The main set stayed at 40/40 while sending ~9 of 24 relations
+  instead of all of them (the Pagila schema is small, so the token saving here is modest: ~1,040 vs 2,251;
+  the point is that it scales to schemas that would not fit).
+- **Single-shot rose from 90% to 98%** on the main set. Part of that is the descriptions and value hints
+  added in M4 (for example the stored spellings that used to cause q08, q13 and q26 to fail first time),
+  so it is not a like-for-like comparison with M3; it is not evidence that the model got better.
+- **The held-out set is the fairer number**, but it is small, was written by the same author, and the
+  held-out numbers were looked at after the embedder choice (not used to tune it). It was not run without
+  retrieval in M8, so it shows the retrieval pipeline is accurate on new questions, not that it beats the
+  full schema.
+- **The reviewer rejected a correct result on one held-out question (h08, "three countries with the most
+  customers")**: it failed all 3 attempts (counted as 3 rejections), so the question ended as `best_effort`
+  with a warning, though the answer was correct. Self-correction
+  never changed a right answer into a wrong one in either set, but false rejections cost an extra LLM
+  call and can add a needless caveat. Tightening the judge prompt is the obvious next step; it was not
+  tuned here because that would mean tuning on the held-out set.
+- Runs vary a little between executions; p95 latency is dominated by the 60 s free-tier rate-limit wait.
+
 
 ## 11. Observability
 
-LangSmith is enabled through environment variables (`LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`,
+LangSmith (M8: `call()` is wrapped in `@traceable(run_type="llm")`; `app/config.py` exports `LANGSMITH_*` from `.env` into the process environment, and forces tracing off when no key is set) is enabled through environment variables (`LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`,
 `LANGSMITH_PROJECT`). Runs are tagged with the embedder, the model and `eval` vs `ui`. Nothing else is
 required. LangGraph nodes and LLM calls are traced automatically.
 
@@ -501,7 +538,7 @@ text-to-sql-bot/
 | M5 | **Clarification** ✅ | Ambiguous and out-of-scope handling with `interrupt()` |
 | M6 | **Streamlit UI** ✅ | Chat, table, SQL, trace, charts, sidebar settings |
 | M7 | **Bring your own data (full)** ✅ | CSV/Excel upload, upload wizard in the UI (dumps reuse the M1 loader), relationship confirmation, auto descriptions, dataset selector (Section 15) |
-| M8 | **Polish** | LangSmith on; README with architecture diagram, eval metrics, demo GIF |
+| M8 | **Polish** ✅ | LangSmith on; README with architecture diagram, eval metrics, demo GIF |
 | M9 | **Scale-up (optional)** | AdventureWorks loaded; Section 14 techniques 4–8 behind flags; ablation report |
 
 ## 14. Scaling to Larger Schemas (e.g. AdventureWorks)

@@ -43,4 +43,19 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    _enable_tracing()
+    return settings
+
+
+def _enable_tracing() -> None:
+    """LangSmith reads os.environ, not our settings: export LANGSMITH_* from .env (never overriding
+    variables already set). Tracing stays off unless LANGSMITH_TRACING=true and a key is present."""
+    from dotenv import dotenv_values
+    import os
+
+    values = {k: v for k, v in dotenv_values(".env").items() if k.startswith("LANGSMITH_") and v}
+    for k, v in values.items():
+        os.environ.setdefault(k, v)
+    if not os.environ.get("LANGSMITH_API_KEY"):
+        os.environ["LANGSMITH_TRACING"] = "false"
