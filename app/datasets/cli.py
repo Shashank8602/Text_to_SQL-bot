@@ -1,7 +1,10 @@
-"""Dataset management from the command line (the Streamlit upload wizard comes in M7).
+"""Dataset management from the command line (the Streamlit upload page does the same).
 
     python -m app.datasets.cli load sample_data/pagila/pagila.sql.gz --name Pagila
     python -m app.datasets.cli load mydb.sql --name "My Shop" --hide customers.phone --expose users.password_hint
+    python -m app.datasets.cli load customers.csv orders.csv --name "My Shop" --yes-relationships
+    python -m app.datasets.cli load book.xlsx --name Sales
+    python -m app.datasets.cli describe pagila --auto
     python -m app.datasets.cli describe pagila sample_data/pagila/descriptions.yaml
     python -m app.datasets.cli index pagila --embedder local
     python -m app.datasets.cli list
@@ -26,8 +29,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.datasets.cli")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    load = sub.add_parser("load", help="load a plain-SQL PostgreSQL dump (.sql or .sql.gz)")
-    load.add_argument("file", type=Path)
+    load = sub.add_parser("load", help="load a plain-SQL dump (.sql/.sql.gz), or CSV / Excel files")
+    load.add_argument("files", type=Path, nargs="+", metavar="file")
+    load.add_argument("--yes-relationships", action="store_true",
+                      help="CSV/Excel: accept every detected relationship without asking")
+    load.add_argument("--no-relationships", action="store_true", help="CSV/Excel: skip relationship detection")
+    load.add_argument("--type", action="append", default=[], metavar="TABLE.COLUMN=TYPE",
+                      help="CSV/Excel: override an inferred column type (repeatable)")
     load.add_argument("--name", required=True, help="display name, e.g. 'Pagila'")
     load.add_argument("--slug", help="dataset id (default: derived from --name)")
     load.add_argument("--hide", action="append", default=[], metavar="TABLE[.COLUMN]",
@@ -39,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
 
     describe = sub.add_parser("describe", help="import business descriptions (YAML) for a dataset")
     describe.add_argument("slug")
-    describe.add_argument("file", type=Path)
+    describe.add_argument("file", type=Path, nargs="?", help="YAML file; omit with --auto")
+    describe.add_argument("--auto", action="store_true", help="draft descriptions with the LLM")
 
     index = sub.add_parser("index", help="(re)build the schema-retrieval index of a dataset")
     index.add_argument("slug")
@@ -56,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "list":
             return _list()
         if args.command == "describe":
-            return _describe(args.slug, args.file)
+            return _describe(args.slug, args.file, auto=args.auto)
         if args.command == "index":
             return _index(args.slug, args.embedder)
         delete_dataset(args.slug)
@@ -68,9 +77,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _load(args: argparse.Namespace) -> int:
-    print(f"Loading {args.file} ...")
     start = time.perf_counter()
-    report = load_pg_dump(args.file, args.name, slug=args.slug, hide=args.hide, expose=args.expose)
+    is_dump = all(f.name.lower().endswith((".sql", ".sql.gz", ".dump")) for f in args.files)
+    if is_dump:
+        if len(args.files) != 1:
+            raise ValueError("Load one dump at a time.")
+        print(f"Loading {args.files[0]} ...")
+        report = load_pg_dump(args.files[0], args.name, slug=args.slug, hide=args.hide, expose=args.expose)
+    else:
+        report = _load_tabular(args)
     elapsed = time.perf_counter() - start
 
     visible = [r for r in report.relations if any(not c.hidden for c in r.columns)]
@@ -90,10 +105,44 @@ def _load(args: argparse.Namespace) -> int:
     return 0
 
 
-def _describe(slug: str, path: Path) -> int:
+def _load_tabular(args: argparse.Namespace):
+    from app.datasets.relationships import detect
+    from app.datasets.tabular_loader import load_tabular, parse_files
+
+    print("Reading " + ", ".join(f.name for f in args.files) + " ...")
+    tables = parse_files(args.files)
+    for t in tables:
+        print(f"  {t.name}: {len(t.rows)} rows; " + ", ".join(f"{c.name} {c.type}" for c in t.columns))
+    overrides = {}
+    for item in args.type:
+        key, _, typ = item.partition("=")
+        overrides[key] = typ
+    accepted = []
+    candidates = [] if args.no_relationships else detect(tables)
+    for rel in candidates:
+        if args.yes_relationships or (sys.stdin.isatty() and input(f"Relationship {rel.label()} [Y/n]? ").strip().lower() in ("", "y", "yes")):
+            accepted.append(rel)
+    if candidates:
+        print(f"Relationships applied: {len(accepted)} of {len(candidates)} detected"
+              + ("" if args.yes_relationships or sys.stdin.isatty() else " (use --yes-relationships to accept)"))
+    source = "excel" if any(f.suffix.lower() == ".xlsx" for f in args.files) else "csv"
+    return load_tabular(tables, args.name, slug=args.slug, type_overrides=overrides, relationships=accepted,
+                        hide=args.hide, expose=args.expose, source_type=source)
+
+
+def _describe(slug: str, path: Path | None, auto: bool = False) -> int:
     ds = registry.get(slug)
     if ds is None:
         raise ValueError(f"No dataset named '{slug}'.")
+    if auto:
+        from app.datasets.describer import describe_and_save
+        desc = describe_and_save(slug)
+        print(f"Drafted descriptions for '{slug}': {len(desc.tables)} tables, "
+              f"{sum(len(c) for c in desc.columns.values())} columns, {len(desc.glossary)} glossary terms. "
+              "Review them in the UI or replace them with a YAML file.")
+        return _index(slug, None)
+    if path is None:
+        raise ValueError("Give a YAML file, or use --auto.")
     desc = descriptions_store.parse_yaml(path)
     problems = descriptions_store.validate(desc, load_catalog(ds.db_name))
     if problems:

@@ -119,7 +119,8 @@ def main() -> None:
     with st.sidebar:
         st.title("🗄️ Text-to-SQL Bot")
         if not ready:
-            st.error("No dataset loaded. Run: `python -m app.datasets.cli load <dump> --name <name>`")
+            st.info("No dataset loaded yet. Upload one to get started.")
+            st.page_link("pages/1_Upload_data.py", label="Upload data", icon="📤")
             st.stop()
         by_slug = {d.slug: d for d in ready}
         slug = st.selectbox("Dataset", list(by_slug), format_func=lambda s: by_slug[s].name,

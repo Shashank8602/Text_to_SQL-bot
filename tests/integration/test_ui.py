@@ -70,3 +70,37 @@ def test_agent_exception_is_shown_not_raised(pagila_db, monkeypatch):
     at.chat_input[0].set_value("hi").run()
     assert not at.exception
     assert any("database down" in e.value for e in at.error)
+
+
+UPLOAD = str(Path(__file__).resolve().parents[2] / "app" / "ui" / "pages" / "1_Upload_data.py")
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "sample_csv"
+
+
+def test_upload_page_renders_and_lists_datasets(pagila_db):
+    at = AppTest.from_file(UPLOAD, default_timeout=60).run()
+    assert not at.exception
+    assert any("Bring your own data" in t.value for t in at.title)
+    assert any(TEST_SLUG in m.value for m in at.markdown)
+
+
+def test_upload_review_step_loads_a_dataset(pagila_db):
+    from app.datasets import registry
+    from app.datasets.loader import delete_dataset
+    from app.datasets.relationships import detect
+    from app.datasets.tabular_loader import parse_files
+
+    tables = parse_files([FIXTURES / f"{n}.csv" for n in ("customers", "products", "orders")])
+    at = AppTest.from_file(UPLOAD, default_timeout=60)
+    at.session_state["wizard"] = {"kind": "tabular", "name": "UI Shop", "tables": tables,
+                                  "candidates": detect(tables), "paths": [FIXTURES / "orders.csv"]}
+    try:
+        at.run()
+        assert not at.exception
+        assert len(at.checkbox) == 2          # two detected relationships, both pre-ticked
+        next(b for b in at.button if b.label == "Load dataset").click().run()
+        assert not at.exception, at.exception
+        assert registry.get("ui_shop").status == "ready"
+        assert any("is loaded" in s.value for s in at.success)
+    finally:
+        if registry.get("ui_shop"):
+            delete_dataset("ui_shop")
