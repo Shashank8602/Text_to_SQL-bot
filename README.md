@@ -3,7 +3,7 @@
 Ask questions about your own data in plain English. An LLM writes the SQL, and when the query fails or
 returns a wrong-looking result, the agent feeds the failure back and retries.
 
-Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **M3 (self-correcting agent + evaluation) complete**; schema retrieval is next (M4)
+Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **M6 (Streamlit UI) complete**; CSV/Excel upload is next (M7)
 
 ## Quickstart
 
