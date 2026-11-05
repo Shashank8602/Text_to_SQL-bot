@@ -499,7 +499,7 @@ text-to-sql-bot/
 | M3 | **Agentic loop + eval harness** ✅ | LangGraph graph with deterministic validation + LLM judge, feedback, dedupe, 3 attempts, best-effort/give-up; 40-question eval set with verified gold SQL; first numbers (single-shot vs self-correcting) in Section 10 |
 | M4 | **Retrieval** ✅ | Descriptions + glossary, inferred FKs, both embedders + pgvector index, hybrid ranking, value index, glossary linking, join paths; retrieval comparison; local embedder chosen; held-out question set (Section 10) |
 | M5 | **Clarification** ✅ | Ambiguous and out-of-scope handling with `interrupt()` |
-| M6 | **Streamlit UI** | Chat, table, SQL, trace, charts, sidebar settings |
+| M6 | **Streamlit UI** ✅ | Chat, table, SQL, trace, charts, sidebar settings |
 | M7 | **Bring your own data (full)** | CSV/Excel upload, upload wizard in the UI (dumps reuse the M1 loader), relationship confirmation, auto descriptions, dataset selector (Section 15) |
 | M8 | **Polish** | LangSmith on; README with architecture diagram, eval metrics, demo GIF |
 | M9 | **Scale-up (optional)** | AdventureWorks loaded; Section 14 techniques 4–8 behind flags; ablation report |
