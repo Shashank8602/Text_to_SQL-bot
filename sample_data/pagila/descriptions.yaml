@@ -1,0 +1,86 @@
+# Business descriptions for the Pagila sample. Import with:
+#   python -m app.datasets.cli describe pagila sample_data/pagila/descriptions.yaml
+# (or pass --descriptions to `load`). Used for schema retrieval and shown to the LLM.
+# Written WITHOUT values that appear in eval/ questions, so descriptions don't leak eval answers.
+
+tables:
+  actor:
+    description: Film actors. Names are stored in UPPERCASE.
+    columns:
+      first_name: Actor first name, UPPERCASE.
+      last_name: Actor last name, UPPERCASE.
+  actor_info:
+    description: View listing each actor with the films they appeared in, grouped by category.
+  address:
+    description: Street addresses of customers, staff and stores.
+    columns:
+      district: Region or state within the country.
+  category:
+    description: Film genres.
+    columns:
+      name: Genre name.
+  city:
+    description: Cities. Some names include an alternative name in parentheses.
+  country:
+    description: Countries, by full official-style name.
+  customer:
+    description: Customers who rent films. Names are stored in UPPERCASE. Each customer belongs to a home store.
+    columns:
+      activebool: Whether the customer account is active (preferred over the legacy integer column 'active').
+      active: Legacy integer active flag (1/0); may disagree with activebool.
+      create_date: Date the customer signed up.
+  customer_list:
+    description: View of customers with their full address, city, country and phone.
+  film:
+    description: Films in the catalog (one row per title).
+    columns:
+      rental_rate: Price in dollars to rent the film once.
+      rental_duration: Standard rental period in days.
+      length: Running time in minutes.
+      replacement_cost: Price charged if the copy is lost or damaged.
+      rating: MPAA rating.
+      special_features: Array of bonus features included with the film.
+      release_year: Year the film was released.
+      length_hours: Running time in hours.
+  film_actor:
+    description: Which actors appear in which films (many-to-many link between film and actor).
+  film_category:
+    description: The genre of each film (link between film and category).
+  film_embedding:
+    description: Internal vector data for films; not useful for business questions.
+  film_list:
+    description: View of films with category, price, length, rating and a comma-separated actor list.
+  inventory:
+    description: Physical copies of films held by stores. A film can have many copies; rentals refer to a copy.
+  language:
+    description: Languages a film can be in.
+  payment:
+    description: Payments made by customers for rentals. Each payment is linked to a rental, a customer and a staff member.
+    columns:
+      amount: Amount paid in dollars.
+      payment_date: When the payment was made.
+  rental:
+    description: One row per rental of a film copy (inventory item) by a customer.
+    columns:
+      rental_date: When the film copy was rented.
+      return_date: When it was returned; NULL means not returned yet.
+  rental_by_category:
+    description: Materialized view of total sales per film category.
+  sales_by_film_category:
+    description: View of total sales (revenue) per film category.
+  sales_by_store:
+    description: View of total sales per store with its city, country and manager.
+  staff:
+    description: Employees who process rentals and payments. Each works at one store.
+  staff_list:
+    description: View of staff with their address, city, country and store.
+  store:
+    description: Rental stores. Each has a manager (a staff member) and an address.
+
+glossary:
+  revenue: SUM(payment.amount). Also called sales or money paid.
+  rentals: Rows in rental; count them for "how many rentals" or "most rented".
+  active customer: customer.activebool = true.
+  customer's country: customer → address → city → country.
+  film's category / genre: film → film_category → category.
+  film's store: inventory.store_id (copies belong to stores).

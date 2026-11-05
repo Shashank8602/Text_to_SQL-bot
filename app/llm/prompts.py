@@ -103,10 +103,15 @@ def generate_sql_messages(
     schema_ddl: str,
     *,
     previous_attempts: Sequence[FailedAttempt] = (),
+    value_hints: Sequence[str] = (),
     today: date | None = None,
 ) -> list[dict]:
     system = GENERATE_SQL_SYSTEM.format(today=(today or date.today()).isoformat(), schema=schema_ddl)
     user = f"Question:\n<question>\n{question}\n</question>"
+    if value_hints:
+        user += ("\n\nWords in the question match these stored values (use the exact stored spelling "
+                 "if you filter on them; ignore any that are unrelated):\n<value_matches>\n"
+                 + "\n".join(value_hints) + "\n</value_matches>")
     if previous_attempts:
         user += "\n\n" + _feedback(previous_attempts)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]

@@ -46,11 +46,16 @@ class Draft:
 class AgentState(TypedDict, total=False):
     # inputs
     question: str
+    dataset: str               # slug
     db_name: str
     max_attempts: int
     compose: bool              # False skips the final answer call (used by the eval)
+    retrieval: str | None      # "local" | "gemini" | "none"; None = settings
     # working state
-    schema_ddl: str
+    schema_ddl: str            # schema for the first attempt (retrieved tables)
+    schema_ddl_retry: str      # wider schema for retries
+    retrieved_tables: list[str] | None
+    value_hints: list[str]
     draft: Draft | None
     result: QueryResult | None
     attempts: Annotated[list[Attempt], operator.add]

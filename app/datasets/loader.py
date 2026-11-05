@@ -114,6 +114,8 @@ def load_pg_dump(
             if not any(not c.hidden for r in relations for c in r.columns):
                 raise DatasetLoadError("The dump contains no tables the bot could query.")
             _harden_and_grant(conn, db_name, relations)
+            # Fresh tables have no statistics: row estimates (shown to the LLM) would read ~0.
+            conn.execute("ANALYZE")
             conn.commit()
         report = LoadReport(slug, db_name, relations, ran, skipped)
         registry.mark_ready(slug, hidden_columns=report.hidden_columns)

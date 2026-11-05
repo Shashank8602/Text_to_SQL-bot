@@ -8,4 +8,9 @@ sqlglot==30.27.0
 litellm==1.106.2
 langgraph==1.2.16
 pyyaml==6.0.3
+# Local embeddings for schema retrieval (M4). CPU-only torch keeps the install ~10x smaller.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+sentence-transformers==6.2.0
+transformers==5.20.2
 pytest==9.2.0

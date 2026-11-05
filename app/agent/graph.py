@@ -23,26 +23,52 @@ from app.agent.state import AgentState, Attempt, Draft, LLMCall, Outcome
 from app.agent.validation import check_result, column_hint, pattern_match_notes
 from app.database.catalog import Catalog, load_catalog
 from app.database.executor import QueryError, QueryResult, execute_readonly
+from app.config import get_settings
 from app.database.safety import check_sql
+from app.datasets import descriptions as descriptions_store
+from app.datasets import registry
 from app.llm import client
+from app.retrieval.retriever import glossary_tables, rank_tables, select, value_matches
 from app.llm.prompts import (
     Answer, JudgeVerdict, SQLGeneration, answer_messages, generate_sql_messages, judge_messages,
 )
 
 DEFAULT_MAX_ATTEMPTS = 3
+RETRY_EXTRA_TABLES = 4
 _UNDEFINED_OBJECT_STATES = {"42703", "42P01"}  # undefined_column, undefined_table
 
 
 # --------------------------------------------------------------------------- nodes
 
 def retrieve_schema(state: AgentState) -> dict:
-    # M4 replaces this with embedding retrieval of the relevant tables.
-    return {"schema_ddl": _catalog(state).to_ddl()}
+    """Pick the relevant tables (docs/DESIGN.md §6.2). Retries get a wider schema."""
+    catalog, desc = _catalog(state), descriptions_store.load(state["dataset"])
+    mode = state.get("retrieval") or get_settings().retrieval_embedder
+    full = {"schema_ddl": catalog.to_ddl(descriptions=desc), "retrieved_tables": None, "value_hints": []}
+    if mode == "none":
+        return full | {"schema_ddl_retry": full["schema_ddl"]}
+    k = get_settings().retrieval_top_k
+    try:
+        ranked = rank_tables(state["dataset"], state["question"], catalog, embedder_name=mode)
+    except Exception as e:  # embedder/index unavailable: degrade to the full schema, don't fail
+        return full | {"schema_ddl_retry": full["schema_ddl"], "warning": f"Schema retrieval unavailable ({e})."}
+    matches = value_matches(state["question"], catalog)
+    forced = glossary_tables(state["question"], desc.glossary, catalog)
+    narrow = select(ranked, catalog, k, matches, forced)
+    wide = select(ranked, catalog, k + RETRY_EXTRA_TABLES, matches, forced)
+    return {
+        "schema_ddl": catalog.to_ddl(narrow.tables, descriptions=desc),
+        "schema_ddl_retry": catalog.to_ddl(wide.tables, descriptions=desc),
+        "retrieved_tables": narrow.tables,
+        "value_hints": [m.hint() for m in matches],
+    }
 
 
 def generate_sql(state: AgentState) -> dict:
-    messages = generate_sql_messages(
-        state["question"], state["schema_ddl"], previous_attempts=state.get("attempts", []))
+    attempts = state.get("attempts", [])
+    schema = state["schema_ddl_retry"] if attempts else state["schema_ddl"]
+    messages = generate_sql_messages(state["question"], schema, previous_attempts=attempts,
+                                     value_hints=state.get("value_hints", []))
     try:
         r = client.call("generator", messages, SQLGeneration)
     except client.LLMError as e:
@@ -89,7 +115,9 @@ def validate(state: AgentState) -> dict:
         return _fail(state, "validation_failed", critique=critique, result=result)
 
     referenced = _referenced_tables(draft.sql, catalog)
-    messages = judge_messages(state["question"], draft.sql, result, catalog.to_ddl(referenced or None),
+    desc = descriptions_store.load(state["dataset"])
+    messages = judge_messages(state["question"], draft.sql, result,
+                              catalog.to_ddl(referenced or None, descriptions=desc),
                               filter_notes=pattern_match_notes(draft.sql, catalog))
     try:
         r = client.call("judge", messages, JudgeVerdict)
@@ -181,12 +209,19 @@ class AgentResult:
     error: str | None
     attempts: list[Attempt] = field(default_factory=list)
     llm_calls: list[LLMCall] = field(default_factory=list)
+    retrieved_tables: list[str] | None = None   # None: full schema was used
+    value_hints: list[str] = field(default_factory=list)
 
 
-def run_agent(question: str, db_name: str, *, max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-              compose: bool = True) -> AgentResult:
+def run_agent(question: str, dataset: str, *, max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+              compose: bool = True, retrieval: str | None = None) -> AgentResult:
+    """dataset: slug of a ready dataset. retrieval: "local" | "gemini" | "none" (default: settings)."""
+    ds = registry.get(dataset)
+    if ds is None or ds.status != "ready":
+        raise ValueError(f"No ready dataset named '{dataset}'.")
     final = build_graph().invoke(
-        {"question": question, "db_name": db_name, "max_attempts": max_attempts, "compose": compose,
+        {"question": question, "dataset": dataset, "db_name": ds.db_name, "max_attempts": max_attempts,
+         "compose": compose, "retrieval": retrieval,
          "attempts": [], "llm_calls": [], "draft": None, "result": None},
         config={"recursion_limit": 10 + 5 * max_attempts},
     )
@@ -204,6 +239,8 @@ def run_agent(question: str, db_name: str, *, max_attempts: int = DEFAULT_MAX_AT
         error=final.get("error"),
         attempts=attempts,
         llm_calls=final.get("llm_calls", []),
+        retrieved_tables=final.get("retrieved_tables"),
+        value_hints=final.get("value_hints", []),
     )
 
 
