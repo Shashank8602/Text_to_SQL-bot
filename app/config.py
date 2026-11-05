@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     gemini_rpm: int = 10
     llm_timeout_s: int = 60
 
+    # Schema retrieval (M4). retrieval_embedder: "local", "gemini", or "none" (send the full schema).
+    retrieval_embedder: str = "local"
+    retrieval_top_k: int = 8
+    local_embedding_model: str = "BAAI/bge-small-en-v1.5"
+    gemini_embedding_model: str = "gemini/gemini-embedding-001"
+
 
 @lru_cache
 def get_settings() -> Settings:

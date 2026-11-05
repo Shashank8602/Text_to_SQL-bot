@@ -30,8 +30,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: no ready dataset named '{args.dataset}'.", file=sys.stderr)
         return 1
 
-    r = run_agent(args.question, ds.db_name, max_attempts=args.max_attempts)
+    r = run_agent(args.question, args.dataset, max_attempts=args.max_attempts)
 
+    if r.retrieved_tables is not None:
+        print(f"Schema: {len(r.retrieved_tables)} tables retrieved: {', '.join(r.retrieved_tables)}")
+    if r.value_hints:
+        print(f"Value matches: {'; '.join(r.value_hints)}")
+    if r.retrieved_tables is not None or r.value_hints:
+        print()
     if r.attempts:
         print(f"Agent trace ({len(r.attempts)} attempt{'s' if len(r.attempts) != 1 else ''}):")
         for a in r.attempts:

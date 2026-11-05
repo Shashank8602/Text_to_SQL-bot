@@ -24,12 +24,14 @@ from pathlib import Path
 import yaml
 
 from app.agent.graph import DEFAULT_MAX_ATTEMPTS, AgentResult, run_agent
+from app.config import get_settings
 from app.database.executor import QueryResult, execute_readonly
 from app.datasets import registry
 from eval.scoring import results_match
 
 ROOT = Path(__file__).parent
 QUESTIONS = ROOT / "questions.yaml"
+QUESTION_SETS = {"main": QUESTIONS, "heldout": ROOT / "questions_heldout.yaml"}
 REPORTS = ROOT / "reports"
 
 
@@ -49,6 +51,8 @@ class QuestionScore:
     sql: str | None
     error: str | None = None
     attempt_sql: list[str] = field(default_factory=list)
+    tables_sent: list[str] | None = None      # None: full schema
+    tables_covered: bool | None = None        # all expected tables were sent
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tags", help="comma-separated tags; questions with any of them")
     p.add_argument("--delay", type=float, default=2.0, help="seconds between questions (rate limits)")
     p.add_argument("--label", default=None)
+    p.add_argument("--retrieval", default=None, help="local | gemini | none (default: RETRIEVAL_EMBEDDER)")
+    p.add_argument("--questions", default="main", choices=["main", "heldout"])
     args = p.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -68,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
               "  python -m app.datasets.cli load sample_data/pagila/pagila.sql.gz --name Pagila", file=sys.stderr)
         return 1
 
-    questions = load_questions()
+    questions = load_questions(QUESTION_SETS[args.questions])
     if args.ids:
         wanted = set(args.ids.split(","))
         questions = [q for q in questions if q["id"] in wanted]
@@ -86,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     for i, q in enumerate(questions, 1):
         if i > 1 and args.delay:
             time.sleep(args.delay)
-        s = score_question(q, ds.db_name, args.max_attempts)
+        s = score_question(q, args.dataset, ds.db_name, args.max_attempts, args.retrieval)
         scores.append(s)
         with progress.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(s), default=str) + "\n")
@@ -101,15 +107,19 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def score_question(q: dict, db_name: str, max_attempts: int) -> QuestionScore:
+def score_question(q: dict, dataset: str, db_name: str, max_attempts: int,
+                   retrieval: str | None = None) -> QuestionScore:
     gold = execute_readonly(q["gold_sql"], db_name=db_name)
     order = bool(q.get("order_matters"))
     start = time.perf_counter()
     try:
-        r = run_agent(q["question"], db_name, max_attempts=max_attempts, compose=False)
+        def run():
+            return run_agent(q["question"], dataset, max_attempts=max_attempts, compose=False,
+                             retrieval=retrieval)
+        r = run()
         if r.outcome == "llm_error":  # provider limits: wait for the minute window, retry once
             time.sleep(60)
-            r = run_agent(q["question"], db_name, max_attempts=max_attempts, compose=False)
+            r = run()
     except Exception as e:  # a crash is a bug to report, not a reason to stop the run
         return QuestionScore(q["id"], q["question"], q["tags"], "crash", False, False, [], 0, 0, 0,
                              time.perf_counter() - start, None, error=f"{type(e).__name__}: {e}")
@@ -130,6 +140,8 @@ def score_question(q: dict, db_name: str, max_attempts: int) -> QuestionScore:
         sql=r.sql,
         error=r.error,
         attempt_sql=[a.sql for a in r.attempts],
+        tables_sent=r.retrieved_tables,
+        tables_covered=None if r.retrieved_tables is None else set(q["tables"]) <= set(r.retrieved_tables),
     )
 
 
@@ -164,6 +176,10 @@ def summarize(scores: list[QuestionScore], max_attempts: int) -> dict:
         "p95_seconds": secs[min(n - 1, int(n * 0.95))] if n else 0,
         "outcomes": dict(sorted({o: sum(s.outcome == o for s in scores) for o in {s.outcome for s in scores}}.items())),
         "accuracy_by_tag": {t: _pct(sum(v), len(v)) for t, v in sorted(by_tag.items())},
+        "retrieval_coverage": (_pct(sum(bool(s.tables_covered) for s in scores), n)
+                               if any(s.tables_sent is not None for s in scores) else "full schema"),
+        "avg_tables_sent": (round(statistics.mean(len(s.tables_sent) for s in scores if s.tables_sent), 1)
+                            if any(s.tables_sent for s in scores) else "all"),
     }
 
 
@@ -176,6 +192,7 @@ def format_summary(m: dict) -> str:
         f"Validator rejections: {m['validator_rejections']} ({m['validator_false_rejections']} of them were actually correct)",
         f"Avg attempts: {m['avg_attempts']} · Avg LLM calls: {m['avg_llm_calls']} · Fallback calls: {m['fallback_calls']}",
         f"Latency p50/p95: {m['p50_seconds']}s / {m['p95_seconds']}s",
+        f"Schema sent: {m['retrieval_coverage']} questions had all expected tables · avg tables {m['avg_tables_sent']}",
         f"Outcomes: {m['outcomes']}",
     ]
     return "\n".join(lines)
@@ -203,8 +220,9 @@ def write_report(scores: list[QuestionScore], summary: dict, label: str, args, b
         encoding="utf-8")
 
     md = [f"# Eval report: {label}", "",
-          f"{datetime.now():%Y-%m-%d %H:%M} · dataset `{args.dataset}` · {summary['questions']} questions · "
-          f"max {summary['max_attempts']} attempts", "", "## Summary", "", "| Metric | Value |", "|---|---|"]
+          f"{datetime.now():%Y-%m-%d %H:%M} · dataset `{args.dataset}` · {args.questions} set · "
+          f"{summary['questions']} questions · max {summary['max_attempts']} attempts · "
+          f"retrieval `{args.retrieval or get_settings().retrieval_embedder}`", "", "## Summary", "", "| Metric | Value |", "|---|---|"]
     for k, v in summary.items():
         if k not in ("accuracy_by_tag", "outcomes"):
             md.append(f"| {k.replace('_', ' ')} | {v} |")

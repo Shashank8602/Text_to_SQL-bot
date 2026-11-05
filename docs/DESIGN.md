@@ -233,35 +233,55 @@ reach the LLM):
   This is one of the highest-impact accuracy improvements. LLMs are good at SQL but don't know your
   business definitions.
 
-### 6.2 Retrieval
-- Index one document per table: name, description, column names/descriptions, glossary terms that mention
-  it.
-- For each question: embed it, take the **top-k tables** (k = 5), then **expand along foreign keys** by one
-  hop. This adds the join tables (`film_actor`, `inventory`) that questions rarely mention.
-- Render the selected tables as `CREATE TABLE` DDL with comments and sample values, and send that to the
-  LLM.
+### 6.2 Retrieval (built in M4: `app/retrieval/`)
 
-### 6.3 Embedding providers (to be compared)
+**Index** (`indexer.py`): one document per table (kind, name, description, columns, linked tables) and
+one per column (name, type, description, sample values). For Pagila that is 158 documents, embedded
+and stored in `rag.schema_docs_<embedder>` with a generated `tsvector` for keyword search. Built lazily
+on the first question, or with `python -m app.datasets.cli index <slug>`.
 
-```python
-class Embedder(Protocol):
-    name: str
-    dim: int
-    def embed(self, texts: list[str]) -> list[list[float]]: ...
-```
+**Selection** (`retriever.py`), for each question:
+1. **Hybrid ranking**: vector similarity (best of a table's documents) and Postgres full-text search,
+   fused with Reciprocal Rank Fusion.
+2. **Value matches** (`values.py`): an in-memory index of short text values in base tables (Pagila:
+   7,813 values, built in 1 s). It links words in the question to stored values: 'Canada' →
+   `country.country`, 'Varanasi' → `city.city = 'Varanasi (Benares)'`. Matched tables are always
+   included, and the matches go to the generator as `<value_matches>` hints with the exact stored
+   spelling.
+3. **Glossary linking**: if the question uses a glossary term, the tables named in its definition are
+   included ("revenue" → `SUM(payment.amount)` → `payment`).
+4. **Top-k** (k = 8) plus those, then **join-path completion**: shortest paths over the foreign-key graph
+   add the bridge tables (e.g. payment → rental → inventory → film_category). The graph uses declared
+   FKs plus **inferred FKs**: `x.customer_id` → the one table whose primary key is `customer_id`.
+   Pagila's partitioned `payment` declares no FKs at all.
+5. The selected tables are rendered as DDL with descriptions and the glossary.
+   - **Retries get a wider schema** (k + 4 tables), in case retrieval missed something.
+   - If retrieval fails (model or index unavailable), the agent falls back to the full schema with a
+     warning.
 
-| Provider | Default model | Notes |
+### 6.3 Embedding providers (compared in M4)
+
+| Provider | Model | Notes |
 |---|---|---|
-| `local` | `BAAI/bge-small-en-v1.5` (384-d) or `all-MiniLM-L6-v2` | No quota; adds roughly 1 GB (torch, CPU wheels) to the image |
-| `gemini` | Current Gemini embedding model (verify name at build time) | Uses the Gemini quota that is also the LLM fallback |
+| `local` (**chosen**) | `BAAI/bge-small-en-v1.5`, 384-d, CPU | No quota, no rate limit; ~130 MB model; ~180 ms per query once loaded |
+| `gemini` | `gemini-embedding-001`, truncated to 768-d and normalized | Free tier counts **every text as one request, 100/min**, so indexing is paced at 90 texts/min; ~750 ms per query |
 
-Vectors live in `rag.schema_docs_<provider>`, one table per provider because the dimensions differ.
-`scripts/build_index.py --provider local|gemini` builds an index. The active provider is chosen in `.env`
-or the sidebar.
+**Comparison** (`python -m eval.retrieval_eval`, no LLM calls). "Coverage" is the share of questions
+where *all* expected tables were sent:
 
-**Selection method:** the eval suite (Section 10) reports **table recall@k** for each provider, plus a
-**no-retrieval baseline** that sends the full schema. With only ~15 tables the baseline may win, and that
-is a valid finding worth reporting.
+| Setup (k = 8) | Coverage, main (40) | Coverage, held-out (20) | Avg tokens sent |
+|---|---|---|---|
+| Full schema (no retrieval) | 100% | 100% | 2,251 |
+| local, ranking only | 78% | 80% | ~1,000 |
+| gemini, ranking only | 78% | 75% | ~1,000 |
+| **local + value matches + glossary** | **95%** | **100%** | ~1,040 |
+| gemini + value matches | 90% | 95% | ~1,050 |
+
+- The two embedders tie once value matching is added. **Local was chosen on cost**: no quota and no
+  per-minute limit. The decision used the main set; the held-out numbers were only checked afterwards.
+- The remaining misses ("UK", "USA") are answerable through the `customer_list` view, which retrieval
+  did select.
+- Value matching and glossary linking matter far more than the choice of embedder.
 
 ## 7. Safety
 
@@ -446,14 +466,13 @@ text-to-sql-bot/
 │   ├── llm/        client.py (LiteLLM Router + call()), prompts.py, result_format.py
 │   ├── agent/      graph.py (LangGraph agent + run_agent), state.py, validation.py
 │   ├── ask.py      # CLI: python -m app.ask --dataset <slug> "question"
-│   ├── database/   connection.py, executor.py, safety.py, catalog.py
-│   ├── retrieval/  embedders.py, indexer.py, retriever.py
-│   ├── datasets/   registry.py, dump_parser.py, loader.py, cli.py
+│   ├── database/   connection.py, executor.py, safety.py, catalog.py, migrations.py
+│   ├── retrieval/  embedders.py, indexer.py, retriever.py, values.py
+│   ├── datasets/   registry.py, dump_parser.py, loader.py, descriptions.py, cli.py
 │   │               + tabular_loader.py, relationships.py, describer.py  (M7)
 │   ├── charts.py
 │   └── ui/streamlit_app.py
-├── scripts/build_index.py
-├── eval/       questions.yaml, scoring.py, run_eval.py, reports/
+├── eval/       questions.yaml, questions_heldout.yaml, scoring.py, run_eval.py, retrieval_eval.py, reports/
 └── docs/DESIGN.md
 ```
 
@@ -464,7 +483,7 @@ text-to-sql-bot/
 | M1 | **DB foundation + dump loading** ✅ | `docker compose up` brings up an empty server with the three roles; `app.datasets.cli load` restores a plain-SQL Postgres dump (e.g. the Pagila sample) as an isolated dataset with sensitive columns hidden; malicious dumps are rejected and leave nothing behind; `bot_reader` can only SELECT exposed columns; safety checker blocks malicious queries |
 | M2 | **Single-shot pipeline** ✅ | LiteLLM Router (Groq→Gemini, rpm/tpm limits, verified fallback); schema catalog rendered as DDL from what `bot_reader` can see; `python -m app.ask` runs question → SQL → safety → execute → answer using the full schema |
 | M3 | **Agentic loop + eval harness** ✅ | LangGraph graph with deterministic validation + LLM judge, feedback, dedupe, 3 attempts, best-effort/give-up; 40-question eval set with verified gold SQL; first numbers (single-shot vs self-correcting) in Section 10 |
-| M4 | **Retrieval** | Catalog + descriptions + both embedders + pgvector index; recall@k comparison report; embedder chosen |
+| M4 | **Retrieval** ✅ | Descriptions + glossary, inferred FKs, both embedders + pgvector index, hybrid ranking, value index, glossary linking, join paths; retrieval comparison; local embedder chosen; held-out question set (Section 10) |
 | M5 | **Clarification** | Ambiguous and out-of-scope handling with `interrupt()` |
 | M6 | **Streamlit UI** | Chat, table, SQL, trace, charts, sidebar settings |
 | M7 | **Bring your own data (full)** | CSV/Excel upload, upload wizard in the UI (dumps reuse the M1 loader), relationship confirmation, auto descriptions, dataset selector (Section 15) |
@@ -483,12 +502,12 @@ sees a **small, correct slice** of the schema, which turns a 68-table problem ba
 
 | # | Technique | Fixes | Extra LLM calls | Phase |
 |---|---|---|---|---|
-| 1 | **Join-path computation**: shortest paths over the foreign-key graph between selected tables, adding bridge tables | Missing join tables | 0 | Core (M4), replaces 1-hop expansion |
-| 2 | **Hybrid retrieval**: Postgres full-text (keyword) search + vector search, at **column** level | Exact names that embeddings miss | 0 | Core (M4) |
+| 1 | **Join-path computation**: shortest paths over the foreign-key graph between selected tables, adding bridge tables | Missing join tables | 0 | ✅ M4 (with inferred FKs) |
+| 2 | **Hybrid retrieval**: Postgres full-text (keyword) search + vector search, at **column** level | Exact names that embeddings miss | 0 | ✅ M4 |
 | 3 | **Plan-then-SQL**: the `reasoning` field must list the tables, joins and filters before the SQL | Multi-step questions | 0 | Core (M2 prompt) |
 | 4 | **Curated example bank**: ~30 verified question→SQL pairs, the most similar retrieved as few-shot examples. **Must not overlap the eval set.** | Join conventions, idioms | 0 | M9 (largest single gain) |
 | 5 | **LLM schema selection**: retrieve ~15 candidate tables, then the LLM picks the ones it needs | Precision, prompt size | +1 | M9 |
-| 6 | **Value index**: `pg_trgm` index of distinct text values, used to map "Mountain Bikes" to `ProductCategory.Name` | Entity → column mapping | 0 | M9 |
+| 6 | **Value index**: distinct text values of base tables, used to map "Mountain Bikes" to `ProductCategory.Name`, plus value hints for the generator | Entity → column mapping | 0 | ✅ M4 (moved up: the biggest retrieval gain) |
 | 7 | **Auto-generated descriptions**: the LLM drafts table/column descriptions offline, then a human reviews them | Undocumented schemas | one-time | M7 (needed for uploads) |
 | 8 | **Semantic views**: pre-joined views (`v_sales`, `v_customer_orders`) exposed to the bot | Complex joins | 0 | M9 |
 | 9 | **Self-consistency**: generate N candidates and take a majority vote over their results | Random errors | +N | Optional, off by default (quota) |

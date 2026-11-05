@@ -1,0 +1,171 @@
+# Held-out evaluation questions for the Pagila sample (written 2026-10-31, before M4 tuning).
+#
+# Rule: do NOT change prompts, validation, retrieval or descriptions in response to failures on
+# these questions. They exist to give an honest out-of-sample number; tune on questions.yaml.
+# Same format as questions.yaml.
+
+questions:
+  - id: h01
+    question: How many films run longer than three hours?
+    gold_sql: SELECT count(*) FROM film WHERE length > 180
+    tags: [easy, filter]
+    tables: [film]
+
+  - id: h02
+    question: What would it cost to replace every film in the catalog once?
+    gold_sql: SELECT sum(replacement_cost) FROM film
+    tags: [easy, aggregate]
+    tables: [film]
+
+  - id: h03
+    question: How many cities in India are in the database?
+    gold_sql: |
+      SELECT count(*) FROM city ci JOIN country co ON co.country_id = ci.country_id
+      WHERE co.country = 'India'
+    tags: [join, filter]
+    tables: [city, country]
+
+  - id: h04
+    question: How many payments has Mary Smith made?
+    gold_sql: |
+      SELECT count(*) FROM payment p JOIN customer cu ON cu.customer_id = p.customer_id
+      WHERE cu.first_name = 'MARY' AND cu.last_name = 'SMITH'
+    tags: [literal, join]
+    tables: [payment, customer]
+
+  - id: h05
+    question: What is the average rental duration of comedy films?
+    gold_sql: |
+      SELECT round(avg(f.rental_duration), 2) FROM film f
+      JOIN film_category fc ON fc.film_id = f.film_id
+      JOIN category c ON c.category_id = fc.category_id
+      WHERE c.name = 'Comedy'
+    tags: [literal, multi_join, aggregate]
+    tables: [film, film_category, category]
+
+  - id: h06
+    question: Which store has the most customers?
+    gold_sql: |
+      SELECT store_id FROM customer GROUP BY store_id
+      HAVING count(*) = (SELECT max(n) FROM (SELECT count(*) AS n FROM customer GROUP BY store_id) m)
+    tags: [ranking, aggregate]
+    tables: [customer]
+
+  - id: h07
+    question: How many rentals did customers living in Mexico make in 2024?
+    gold_sql: |
+      SELECT count(*) FROM rental r
+      JOIN customer cu ON cu.customer_id = r.customer_id
+      JOIN address a ON a.address_id = cu.address_id
+      JOIN city ci ON ci.city_id = a.city_id
+      JOIN country co ON co.country_id = ci.country_id
+      WHERE co.country = 'Mexico' AND r.rental_date >= '2024-01-01' AND r.rental_date < '2025-01-01'
+    tags: [multi_join, date]
+    tables: [rental, customer, address, city, country]
+
+  - id: h08
+    question: Which three countries have the most customers?
+    gold_sql: |
+      SELECT co.country FROM customer cu
+      JOIN address a ON a.address_id = cu.address_id
+      JOIN city ci ON ci.city_id = a.city_id
+      JOIN country co ON co.country_id = ci.country_id
+      GROUP BY co.country ORDER BY count(*) DESC LIMIT 3
+    tags: [ranking, multi_join]
+    tables: [customer, address, city, country]
+
+  - id: h09
+    question: How much revenue came from R-rated films?
+    gold_sql: |
+      SELECT sum(p.amount) FROM payment p
+      JOIN rental r ON r.rental_id = p.rental_id
+      JOIN inventory i ON i.inventory_id = r.inventory_id
+      JOIN film f ON f.film_id = i.film_id
+      WHERE f.rating = 'R'
+    tags: [multi_join, aggregate]
+    tables: [payment, rental, inventory, film]
+
+  - id: h10
+    question: How many different customers have rented a horror film?
+    gold_sql: |
+      SELECT count(DISTINCT r.customer_id) FROM rental r
+      JOIN inventory i ON i.inventory_id = r.inventory_id
+      JOIN film_category fc ON fc.film_id = i.film_id
+      JOIN category c ON c.category_id = fc.category_id
+      WHERE c.name = 'Horror'
+    tags: [literal, multi_join]
+    tables: [rental, inventory, film_category, category]
+
+  - id: h11
+    question: How many films have a replacement cost above 25 dollars?
+    gold_sql: SELECT count(*) FROM film WHERE replacement_cost > 25
+    tags: [easy, filter]
+    tables: [film]
+
+  - id: h12
+    question: What was the total of all payments in the first quarter of 2023?
+    gold_sql: |
+      SELECT sum(amount) FROM payment
+      WHERE payment_date >= '2023-01-01' AND payment_date < '2023-04-01'
+    tags: [date, aggregate]
+    tables: [payment]
+
+  - id: h13
+    question: How many films come with trailers?
+    gold_sql: SELECT count(*) FROM film WHERE 'Trailers' = ANY(special_features)
+    tags: [literal, filter]
+    tables: [film]
+
+  - id: h14
+    question: Which genre has the longest films on average?
+    gold_sql: |
+      SELECT c.name FROM film f
+      JOIN film_category fc ON fc.film_id = f.film_id
+      JOIN category c ON c.category_id = fc.category_id
+      GROUP BY c.name ORDER BY avg(f.length) DESC LIMIT 1
+    tags: [ranking, multi_join, aggregate]
+    tables: [film, film_category, category]
+
+  - id: h15
+    question: How many actors have the first name Kenneth?
+    gold_sql: SELECT count(*) FROM actor WHERE first_name = 'KENNETH'
+    tags: [literal, easy]
+    tables: [actor]
+
+  - id: h16
+    question: How many rentals were kept for more than a week?
+    gold_sql: SELECT count(*) FROM rental WHERE return_date - rental_date > interval '7 days'
+    tags: [date, filter]
+    tables: [rental]
+
+  - id: h17
+    question: How many customers have never rented anything?
+    gold_sql: |
+      SELECT count(*) FROM customer cu
+      WHERE NOT EXISTS (SELECT 1 FROM rental r WHERE r.customer_id = cu.customer_id)
+    tags: [subquery, nulls]
+    tables: [customer, rental]
+
+  - id: h18
+    question: What is the average payment amount?
+    gold_sql: SELECT round(avg(amount), 2) FROM payment
+    tags: [easy, aggregate]
+    tables: [payment]
+
+  - id: h19
+    question: How many copies of the film Academy Dinosaur are in stock across all stores?
+    gold_sql: |
+      SELECT count(*) FROM inventory i JOIN film f ON f.film_id = i.film_id
+      WHERE f.title = 'ACADEMY DINOSAUR'
+    tags: [literal, join]
+    tables: [inventory, film]
+
+  - id: h20
+    question: In which month of 2024 were the most rentals made?
+    # Only the count: month labels can legitimately be dates, numbers or names.
+    gold_sql: |
+      SELECT count(*) FROM rental
+      WHERE rental_date >= '2024-01-01' AND rental_date < '2025-01-01'
+      GROUP BY date_trunc('month', rental_date) ORDER BY count(*) DESC LIMIT 1
+    tags: [date, ranking]
+    tables: [rental]

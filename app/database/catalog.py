@@ -32,6 +32,7 @@ class ForeignKey:
     columns: list[str]
     ref_table: str  # qualified like Table.qualified
     ref_columns: list[str]
+    inferred: bool = False  # not declared in the database; inferred from column naming
 
 
 @dataclass
@@ -62,9 +63,17 @@ class Catalog:
     def schemas(self) -> set[str]:
         return {t.schema for t in self.tables}
 
-    def to_ddl(self, tables: list[str] | None = None) -> str:
+    def table(self, qualified: str) -> Table | None:
+        return next((t for t in self.tables if t.qualified == qualified), None)
+
+    def to_ddl(self, tables: list[str] | None = None, descriptions=None) -> str:
+        """descriptions: optional app.datasets.descriptions.Descriptions, rendered as comments."""
         selected = [t for t in self.tables if tables is None or t.qualified in tables]
-        return "\n\n".join(_render(t) for t in selected)
+        ddl = "\n\n".join(_render(t, descriptions) for t in selected)
+        if descriptions is not None and descriptions.glossary:
+            terms = "\n".join(f"-- {term}: {definition}" for term, definition in descriptions.glossary.items())
+            ddl += f"\n\n-- Glossary (business definitions):\n{terms}"
+        return ddl
 
 
 _RELATIONS_SQL = """
@@ -139,7 +148,27 @@ def load_catalog(db_name: str) -> Catalog:
         for table, col in sample_candidates:
             col.sample_values = _sample_values(conn, table, col.name)
 
-    return Catalog(db_name, list(by_oid.values()))
+    tables = list(by_oid.values())
+    _infer_foreign_keys(tables)
+    return Catalog(db_name, tables)
+
+
+def _infer_foreign_keys(tables: list[Table]) -> None:
+    """Add FKs the database doesn't declare: `x.customer_id` -> the one table whose single-column
+    primary key is `customer_id`. Pagila's partitioned `payment` declares none, for example."""
+    pk_owner: dict[str, list[Table]] = {}
+    for t in tables:
+        if t.kind == "table" and len(t.primary_key) == 1 and t.primary_key[0].endswith("_id"):
+            pk_owner.setdefault(t.primary_key[0], []).append(t)
+    for t in tables:
+        if t.kind != "table":
+            continue
+        declared = {fk.columns[0] for fk in t.foreign_keys if len(fk.columns) == 1}
+        for c in t.columns:
+            owners = [o for o in pk_owner.get(c.name, []) if o is not t]
+            if c.name in declared or len(owners) != 1 or t.primary_key == [c.name]:
+                continue
+            t.foreign_keys.append(ForeignKey([c.name], owners[0].qualified, [c.name], inferred=True))
 
 
 def _sample_values(conn: psycopg.Connection, table: Table, column: str) -> list[str] | None:
@@ -158,7 +187,7 @@ def _sample_values(conn: psycopg.Connection, table: Table, column: str) -> list[
     return sorted(str(v) for v in values)[:SAMPLE_SHOW] + (["…"] if len(values) > SAMPLE_SHOW else [])
 
 
-def _render(t: Table) -> str:
+def _render(t: Table, descriptions=None) -> str:
     keyword = {"table": "TABLE", "view": "VIEW", "materialized view": "MATERIALIZED VIEW"}[t.kind]
     single_pk = t.primary_key[0] if len(t.primary_key) == 1 else None
     fk_by_col = {fk.columns[0]: fk for fk in t.foreign_keys if len(fk.columns) == 1}
@@ -172,9 +201,12 @@ def _render(t: Table) -> str:
             line += " NOT NULL"
         if fk := fk_by_col.get(c.name):
             line += f" REFERENCES {fk.ref_table}({fk.ref_columns[0]})"
-        comment = ""
+        notes = []
+        if descriptions is not None and (text := descriptions.column(t.qualified, c.name)):
+            notes.append(text)
         if c.sample_values:
-            comment = "  -- values: " + ", ".join(f"'{v}'" if v != "…" else v for v in c.sample_values)
+            notes.append("values: " + ", ".join(f"'{v}'" if v != "…" else v for v in c.sample_values))
+        comment = ("  -- " + " ".join(notes)) if notes else ""
         items.append((line, comment))
     if len(t.primary_key) > 1:
         items.append((f"  PRIMARY KEY ({', '.join(t.primary_key)})", ""))
@@ -188,4 +220,6 @@ def _render(t: Table) -> str:
         for i, (definition, comment) in enumerate(items)
     )
     header = f"-- {t.kind}, ~{t.row_estimate:,} rows" if t.kind != "view" else "-- view"
+    if descriptions is not None and (text := descriptions.table(t.qualified)):
+        header += f": {text}"
     return f"{header}\nCREATE {keyword} {t.qualified} (\n{body}\n);"
