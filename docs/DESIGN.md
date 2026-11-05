@@ -500,7 +500,7 @@ text-to-sql-bot/
 | M4 | **Retrieval** ✅ | Descriptions + glossary, inferred FKs, both embedders + pgvector index, hybrid ranking, value index, glossary linking, join paths; retrieval comparison; local embedder chosen; held-out question set (Section 10) |
 | M5 | **Clarification** ✅ | Ambiguous and out-of-scope handling with `interrupt()` |
 | M6 | **Streamlit UI** ✅ | Chat, table, SQL, trace, charts, sidebar settings |
-| M7 | **Bring your own data (full)** | CSV/Excel upload, upload wizard in the UI (dumps reuse the M1 loader), relationship confirmation, auto descriptions, dataset selector (Section 15) |
+| M7 | **Bring your own data (full)** ✅ | CSV/Excel upload, upload wizard in the UI (dumps reuse the M1 loader), relationship confirmation, auto descriptions, dataset selector (Section 15) |
 | M8 | **Polish** | LangSmith on; README with architecture diagram, eval metrics, demo GIF |
 | M9 | **Scale-up (optional)** | AdventureWorks loaded; Section 14 techniques 4–8 behind flags; ablation report |
 
@@ -534,8 +534,20 @@ technique's contribution is measured rather than assumed.
 The bot has no built-in data. Users load datasets and pick which one to ask about. Pagila is just a
 sample in `sample_data/pagila/`, loaded the same way.
 
-**Status:** PostgreSQL plain-SQL dumps load from the command line (done in M1). CSV, Excel, the UI
-wizard, relationship detection and descriptions come in M7.
+**Status (M7, done):** plain-SQL dumps (M1), CSV and Excel files, relationship detection with
+confirmation, AI-drafted descriptions, the upload page and dataset management all work, from both the CLI
+and the UI. Custom-format dumps (`.dump`, needs `pg_restore`) remain unsupported: the app runs on the
+host, not in a container that has `pg_restore`, so the loader asks for a plain-SQL export instead.
+
+Implementation: `app/datasets/tabular.py` (parsing, name cleaning, type inference),
+`relationships.py` (detection), `tabular_loader.py` (load + hardening, shared with the dump loader),
+`describer.py` (LLM draft), `app/ui/pages/1_Upload_data.py` (wizard). Notes:
+- Type inference reads every value (not a sample): booleans (`true/false`, `yes/no`), integer/bigint,
+  numeric, date, timestamp, else text. Values with leading zeros (`007`) stay text. The user can override.
+- Confirmed relationships add a `UNIQUE` on the target and a `FOREIGN KEY … NOT VALID` on the source, so the
+  few unmatched rows (≥ 95% must match) do not block the load, and the catalog sees a declared FK.
+- Cell values are loaded with `COPY`, never as SQL text; Excel is read with cached values (no formulas, no
+  macros); each file is limited to `MAX_UPLOAD_MB`.
 
 ### 15.1 Sources
 

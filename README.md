@@ -3,7 +3,7 @@
 Ask questions about your own data in plain English. An LLM writes the SQL, and when the query fails or
 returns a wrong-looking result, the agent feeds the failure back and retries.
 
-Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **M6 (Streamlit UI) complete**; CSV/Excel upload is next (M7)
+Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **M7 (bring your own data) complete**; polish is next (M8)
 
 ## Quickstart
 
@@ -27,10 +27,20 @@ included sample:
 .venv/Scripts/python -m app.datasets.cli delete pagila
 ```
 
+Or load CSV / Excel files (one file or sheet = one table). Relationships between tables are detected and
+you confirm them:
+
+```bash
+.venv/Scripts/python -m app.datasets.cli load customers.csv orders.csv --name "My Shop"
+.venv/Scripts/python -m app.datasets.cli describe my_shop --auto     # LLM-drafted descriptions
+```
+
+The chat UI has an **Upload data** page that does the same step by step.
+
 To load your own database, export it with
 `pg_dump --format=plain --no-owner --no-privileges -f mydb.sql mydb`. Sensitive-looking columns
 (`password`, `token`, `api_key`, …) are hidden from the bot automatically. Use `--hide table.column` or
-`--expose table.column` to adjust. CSV and Excel uploads come in M7.
+`--expose table.column` to adjust.
 
 ## Ask a question
 

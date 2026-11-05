@@ -80,3 +80,27 @@ def load(slug: str) -> Descriptions:
     with psycopg.connect(app_conninfo()) as conn:
         row = conn.execute("SELECT doc FROM rag.dataset_descriptions WHERE dataset = %s", (slug,)).fetchone()
     return Descriptions.from_dict(row[0]) if row else Descriptions()
+
+
+def to_yaml(desc: Descriptions) -> str:
+    """Inverse of parse_yaml (used by the UI to show an editable draft)."""
+    tables: dict = {}
+    for name in sorted(set(desc.tables) | set(desc.columns)):
+        spec: dict = {}
+        if name in desc.tables:
+            spec["description"] = desc.tables[name]
+        if desc.columns.get(name):
+            spec["columns"] = dict(desc.columns[name])
+        tables[name] = spec
+    doc: dict = {"tables": tables}
+    if desc.glossary:
+        doc["glossary"] = dict(desc.glossary)
+    return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=100)
+
+
+def parse_yaml_text(text: str) -> Descriptions:
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "d.yaml"
+        p.write_text(text, encoding="utf-8")
+        return parse_yaml(p)
