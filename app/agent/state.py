@@ -7,7 +7,7 @@ from typing import Annotated, Literal, TypedDict
 from app.database.executor import QueryResult
 
 AttemptStatus = Literal["unsafe", "duplicate", "db_error", "timeout", "validation_failed", "passed"]
-Outcome = Literal["answered", "best_effort", "gave_up", "declined", "llm_error"]
+Outcome = Literal["answered", "best_effort", "gave_up", "declined", "llm_error", "clarifying", "out_of_scope"]
 
 
 @dataclass
@@ -51,6 +51,11 @@ class AgentState(TypedDict, total=False):
     max_attempts: int
     compose: bool              # False skips the final answer call (used by the eval)
     retrieval: str | None      # "local" | "gemini" | "none"; None = settings
+    understand: bool           # False skips question triage (used by the eval)
+    clarifications: Annotated[list[tuple[str, str]], operator.add]  # (agent question, user answer)
+    assumptions: Annotated[list[str], operator.add]    # stated with the final answer
+    pending_question: str | None
+    pending_options: list[str]
     # working state
     schema_ddl: str            # schema for the first attempt (retrieved tables)
     schema_ddl_retry: str      # wider schema for retries

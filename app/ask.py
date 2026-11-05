@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from app.agent.graph import DEFAULT_MAX_ATTEMPTS, run_agent
+from app.agent.graph import DEFAULT_MAX_ATTEMPTS, resume_agent, run_agent
 from app.datasets import registry
 from app.llm.result_format import format_result
 
@@ -31,6 +31,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     r = run_agent(args.question, args.dataset, max_attempts=args.max_attempts)
+    while r.outcome == "clarifying":
+        print(f"I need one detail: {r.clarification}")
+        for i, o in enumerate(r.clarification_options, 1):
+            print(f"  {i}. {o}")
+        try:
+            reply = input("Your answer (number or text): ").strip()
+        except EOFError:
+            print("No answer given; stopping.")
+            return 3
+        if reply.isdigit() and 1 <= int(reply) <= len(r.clarification_options):
+            reply = r.clarification_options[int(reply) - 1]
+        r = resume_agent(r.thread_id, reply, max_attempts=args.max_attempts)
+        print()
 
     if r.retrieved_tables is not None:
         print(f"Schema: {len(r.retrieved_tables)} tables retrieved: {', '.join(r.retrieved_tables)}")
@@ -52,7 +65,9 @@ def main(argv: list[str] | None = None) -> int:
         print("SQL:\n" + "\n".join("  " + line for line in r.sql.splitlines()) + "\n")
     if r.result is not None:
         print("Result:\n" + "\n".join("  " + line for line in format_result(r.result, args.rows).splitlines()) + "\n")
-    if r.outcome == "declined":
+    if r.outcome == "out_of_scope":
+        print(f"Out of scope: {r.answer}\n")
+    elif r.outcome == "declined":
         print(f"Declined: {r.error}\n")
     elif r.answer:
         print(f"Answer{' (best effort)' if r.outcome == 'best_effort' else ''}:\n{r.answer}\n")
