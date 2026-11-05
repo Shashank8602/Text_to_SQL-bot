@@ -33,7 +33,7 @@ def test_glossary_pulls_in_payment(pagila_index, pagila_db):
 
 def test_agent_prompt_uses_retrieved_schema_and_hints(pagila_index, llm):  # noqa: F811
     llm.sql("SELECT nope FROM country", GOOD_SQL).judge(("pass", "")).answer("ok")
-    r = run_agent("How many customers live in Canada?", TEST_SLUG, retrieval="local")
+    r = run_agent("How many customers live in Canada?", TEST_SLUG, retrieval="local", understand=False)
     first = llm.prompts[SQLGeneration][0]
     assert "CREATE TABLE country (" in first[0]["content"]
     assert "CREATE TABLE staff (" not in first[0]["content"]          # not relevant, not sent
@@ -51,7 +51,7 @@ def test_retrieval_failure_falls_back_to_full_schema(pagila_db, llm, monkeypatch
         raise RuntimeError("embedding service down")
     monkeypatch.setattr(graph, "rank_tables", broken)
     llm.sql(GOOD_SQL).judge(("pass", "")).answer("ok")
-    r = run_agent("How many films?", TEST_SLUG, retrieval="local")
+    r = run_agent("How many films?", TEST_SLUG, retrieval="local", understand=False)
     assert r.outcome == "answered" and r.retrieved_tables is None
     assert "CREATE TABLE staff (" in llm.prompts[SQLGeneration][0][0]["content"]
 

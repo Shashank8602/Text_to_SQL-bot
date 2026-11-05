@@ -13,11 +13,14 @@ Every failure is recorded as an Attempt and fed back to the generator on the nex
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from functools import lru_cache
 
 import sqlglot
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from app.agent.state import AgentState, Attempt, Draft, LLMCall, Outcome
 from app.agent.validation import check_result, column_hint, pattern_match_notes
@@ -30,15 +33,48 @@ from app.datasets import registry
 from app.llm import client
 from app.retrieval.retriever import glossary_tables, rank_tables, select, value_matches
 from app.llm.prompts import (
-    Answer, JudgeVerdict, SQLGeneration, answer_messages, generate_sql_messages, judge_messages,
+    Answer, JudgeVerdict, SQLGeneration, Understanding, answer_messages, generate_sql_messages,
+    judge_messages, understand_messages, with_clarifications,
 )
 
 DEFAULT_MAX_ATTEMPTS = 3
+MAX_CLARIFICATIONS = 2
 RETRY_EXTRA_TABLES = 4
 _UNDEFINED_OBJECT_STATES = {"42703", "42P01"}  # undefined_column, undefined_table
 
 
 # --------------------------------------------------------------------------- nodes
+
+def understand_question(state: AgentState) -> dict:
+    """Triage: clear / ambiguous / out of scope (docs/DESIGN.md section 4.3)."""
+    if not state.get("understand", True):
+        return {"pending_question": None}
+    clar = state.get("clarifications", [])
+    catalog, desc = _catalog(state), descriptions_store.load(state["dataset"])
+    messages = understand_messages(state["question"], catalog.to_ddl(descriptions=desc), desc.glossary, clar)
+    try:
+        r = client.call("generator", messages, Understanding)
+    except client.LLMError:
+        return {"pending_question": None}  # triage is an optimisation: go on with the best reading
+    u, calls = r.data, [_llm_call("understand_question", r)]
+    if u.verdict == "out_of_scope":
+        return {"outcome": "out_of_scope", "pending_question": None, "llm_calls": calls,
+                "answer": u.reason or "That is outside what this dataset can answer."}
+    if u.verdict == "ambiguous" and u.clarifying_question and len(clar) < MAX_CLARIFICATIONS:
+        options = [o for o in u.options if o.strip()][:4]
+        return {"pending_question": u.clarifying_question, "pending_options": options, "llm_calls": calls}
+    update: dict = {"pending_question": None, "llm_calls": calls}
+    if u.assumption.strip():
+        update["assumptions"] = [u.assumption.strip()]
+    return update
+
+
+def ask_clarification(state: AgentState) -> dict:
+    """Pause the graph; the caller resumes it with the user's answer (Command(resume=...))."""
+    question = state["pending_question"]
+    answer = interrupt({"question": question, "options": state.get("pending_options", [])})
+    return {"clarifications": [(question, str(answer).strip())], "pending_question": None}
+
 
 def retrieve_schema(state: AgentState) -> dict:
     """Pick the relevant tables (docs/DESIGN.md §6.2). Retries get a wider schema."""
@@ -49,11 +85,11 @@ def retrieve_schema(state: AgentState) -> dict:
         return full | {"schema_ddl_retry": full["schema_ddl"]}
     k = get_settings().retrieval_top_k
     try:
-        ranked = rank_tables(state["dataset"], state["question"], catalog, embedder_name=mode)
+        ranked = rank_tables(state["dataset"], _q(state), catalog, embedder_name=mode)
     except Exception as e:  # embedder/index unavailable: degrade to the full schema, don't fail
         return full | {"schema_ddl_retry": full["schema_ddl"], "warning": f"Schema retrieval unavailable ({e})."}
-    matches = value_matches(state["question"], catalog)
-    forced = glossary_tables(state["question"], desc.glossary, catalog)
+    matches = value_matches(_q(state), catalog)
+    forced = glossary_tables(_q(state), desc.glossary, catalog)
     narrow = select(ranked, catalog, k, matches, forced)
     wide = select(ranked, catalog, k + RETRY_EXTRA_TABLES, matches, forced)
     return {
@@ -67,7 +103,7 @@ def retrieve_schema(state: AgentState) -> dict:
 def generate_sql(state: AgentState) -> dict:
     attempts = state.get("attempts", [])
     schema = state["schema_ddl_retry"] if attempts else state["schema_ddl"]
-    messages = generate_sql_messages(state["question"], schema, previous_attempts=attempts,
+    messages = generate_sql_messages(_q(state), schema, previous_attempts=attempts,
                                      value_hints=state.get("value_hints", []))
     try:
         r = client.call("generator", messages, SQLGeneration)
@@ -116,7 +152,7 @@ def validate(state: AgentState) -> dict:
 
     referenced = _referenced_tables(draft.sql, catalog)
     desc = descriptions_store.load(state["dataset"])
-    messages = judge_messages(state["question"], draft.sql, result,
+    messages = judge_messages(_q(state), draft.sql, result,
                               catalog.to_ddl(referenced or None, descriptions=desc),
                               filter_notes=pattern_match_notes(draft.sql, catalog))
     try:
@@ -144,15 +180,25 @@ def compose_answer(state: AgentState) -> dict:
     if not state.get("compose", True):
         return {"outcome": outcome}
     caveat = state.get("warning") if outcome == "best_effort" else None
+    assumptions = state.get("assumptions", [])
     try:
-        r = client.call("generator", answer_messages(state["question"], state["final_sql"], state["result"],
+        r = client.call("generator", answer_messages(_q(state), state["final_sql"], state["result"],
                                                      caveat=caveat), Answer)
     except client.LLMError as e:
         return {"outcome": outcome, "answer": None, "error": f"Could not compose an answer: {e}"}
-    return {"outcome": outcome, "answer": r.data.answer, "llm_calls": [_llm_call("compose_answer", r)]}
+    text = r.data.answer
+    if assumptions:
+        text += "\n\n*Assumption: " + " ".join(assumptions) + "*"
+    return {"outcome": outcome, "answer": text, "llm_calls": [_llm_call("compose_answer", r)]}
 
 
 # --------------------------------------------------------------------------- routing
+
+def _after_understand(state: AgentState) -> str:
+    if state.get("outcome") == "out_of_scope":
+        return END
+    return "ask_clarification" if state.get("pending_question") else "retrieve_schema"
+
 
 def _after_generate(state: AgentState) -> str:
     return END if state.get("outcome") in ("llm_error", "declined") else "check_sql"
@@ -170,9 +216,14 @@ def _after_finish(state: AgentState) -> str:
     return "compose_answer" if state["outcome"] == "best_effort" else END
 
 
+_CHECKPOINTER = MemorySaver()  # per process; one chat session = one thread_id
+
+
 @lru_cache
 def build_graph():
     g = StateGraph(AgentState)
+    g.add_node("understand_question", understand_question)
+    g.add_node("ask_clarification", ask_clarification)
     g.add_node("retrieve_schema", retrieve_schema)
     g.add_node("generate_sql", generate_sql)
     g.add_node("check_sql", check)
@@ -181,7 +232,10 @@ def build_graph():
     g.add_node("finish_failure", finish_failure)
     g.add_node("compose_answer", compose_answer)
 
-    g.add_edge(START, "retrieve_schema")
+    g.add_edge(START, "understand_question")
+    g.add_conditional_edges("understand_question", _after_understand,
+                            ["ask_clarification", "retrieve_schema", END])
+    g.add_edge("ask_clarification", "understand_question")
     g.add_edge("retrieve_schema", "generate_sql")
     g.add_conditional_edges("generate_sql", _after_generate, ["check_sql", END])
     g.add_conditional_edges("check_sql", _after_step("execute_sql"),
@@ -192,7 +246,7 @@ def build_graph():
                             ["compose_answer", "generate_sql", "finish_failure"])
     g.add_conditional_edges("finish_failure", _after_finish, ["compose_answer", END])
     g.add_edge("compose_answer", END)
-    return g.compile()
+    return g.compile(checkpointer=_CHECKPOINTER)
 
 
 # --------------------------------------------------------------------------- entry point
@@ -211,36 +265,62 @@ class AgentResult:
     llm_calls: list[LLMCall] = field(default_factory=list)
     retrieved_tables: list[str] | None = None   # None: full schema was used
     value_hints: list[str] = field(default_factory=list)
+    assumptions: list[str] = field(default_factory=list)
+    thread_id: str | None = None
+    clarification: str | None = None            # set when outcome == "clarifying"
+    clarification_options: list[str] = field(default_factory=list)
 
 
 def run_agent(question: str, dataset: str, *, max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-              compose: bool = True, retrieval: str | None = None) -> AgentResult:
-    """dataset: slug of a ready dataset. retrieval: "local" | "gemini" | "none" (default: settings)."""
+              compose: bool = True, retrieval: str | None = None, understand: bool = True,
+              thread_id: str | None = None) -> AgentResult:
+    """dataset: slug of a ready dataset. retrieval: "local" | "gemini" | "none" (default: settings).
+
+    If the question is ambiguous the result has outcome "clarifying"; answer it with resume_agent()."""
     ds = registry.get(dataset)
     if ds is None or ds.status != "ready":
         raise ValueError(f"No ready dataset named '{dataset}'.")
+    thread_id = thread_id or uuid.uuid4().hex
     final = build_graph().invoke(
         {"question": question, "dataset": dataset, "db_name": ds.db_name, "max_attempts": max_attempts,
-         "compose": compose, "retrieval": retrieval,
+         "compose": compose, "retrieval": retrieval, "understand": understand,
+         "clarifications": [], "assumptions": [], "pending_question": None,
          "attempts": [], "llm_calls": [], "draft": None, "result": None},
-        config={"recursion_limit": 10 + 5 * max_attempts},
+        config=_config(thread_id, max_attempts),
     )
+    return _to_result(question, final, thread_id)
+
+
+def resume_agent(thread_id: str, answer: str, *, max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> AgentResult:
+    """Continue a run that stopped with outcome "clarifying", giving the user's answer."""
+    config = _config(thread_id, max_attempts)
+    snapshot = build_graph().get_state(config)
+    if not snapshot.next:
+        raise ValueError("This conversation is not waiting for a clarification.")
+    final = build_graph().invoke(Command(resume=answer), config=config)
+    return _to_result(snapshot.values["question"], final, thread_id)
+
+
+def _config(thread_id: str, max_attempts: int) -> dict:
+    return {"configurable": {"thread_id": thread_id}, "recursion_limit": 25 + 5 * max_attempts}
+
+
+def _to_result(question: str, final: dict, thread_id: str) -> AgentResult:
     attempts = final.get("attempts", [])
+    common = dict(question=question, attempts=attempts, llm_calls=final.get("llm_calls", []),
+                  assumptions=final.get("assumptions", []), thread_id=thread_id,
+                  retrieved_tables=final.get("retrieved_tables"), value_hints=final.get("value_hints", []))
+    if intr := final.get("__interrupt__"):
+        payload = intr[0].value
+        return AgentResult(outcome="clarifying", sql=None, reasoning=None, result=None, answer=None,
+                           warning=None, error=None, clarification=payload["question"],
+                           clarification_options=payload["options"], **common)
     final_sql = final.get("final_sql")
     reasoning = next((a.reasoning for a in attempts if a.sql == final_sql), None)
     return AgentResult(
-        question=question,
-        outcome=final["outcome"],
-        sql=final_sql,
-        reasoning=reasoning,
+        outcome=final["outcome"], sql=final_sql, reasoning=reasoning,
         result=final.get("result") if final["outcome"] in ("answered", "best_effort") else None,
-        answer=final.get("answer"),
-        warning=final.get("warning"),
-        error=final.get("error"),
-        attempts=attempts,
-        llm_calls=final.get("llm_calls", []),
-        retrieved_tables=final.get("retrieved_tables"),
-        value_hints=final.get("value_hints", []),
+        answer=final.get("answer"), warning=final.get("warning"), error=final.get("error"), **common,
     )
 
 
@@ -277,6 +357,11 @@ def _explain_failure(state: AgentState) -> str:
     lines.append("Try rephrasing the question, or be more specific about the names, dates or measures "
                  "you mean.")
     return "\n".join(lines)
+
+
+def _q(state: AgentState) -> str:
+    """The question plus any clarifications the user gave."""
+    return with_clarifications(state["question"], state.get("clarifications", []))
 
 
 def _catalog(state: AgentState) -> Catalog:

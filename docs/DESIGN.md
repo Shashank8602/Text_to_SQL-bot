@@ -143,6 +143,20 @@ class AgentState(TypedDict):
 | "Top 5 most rented films" | only nuance: ties at rank 5 | **Assume**: "Ties broken alphabetically" |
 | "Monthly rentals" | which year? The data covers only a few months | **Assume**: "Showing all months in the dataset" |
 
+### 4.4 Implementation notes (M5)
+
+- `understand_question` is one `generator` call returning `Understanding{interpretations, verdict,
+  assumption, clarifying_question, options, reason}`. Its failure never blocks a question (it falls
+  through as "clear"). The eval runs with `understand=False`: its questions are precise, and the
+  call would only spend quota.
+- `ask_clarification` uses `interrupt()`; the graph is compiled with an in-memory `MemorySaver`.
+  `run_agent()` returns outcome `clarifying` with `clarification`, `clarification_options` and a
+  `thread_id`; `resume_agent(thread_id, answer)` continues. Max 2 rounds (`MAX_CLARIFICATIONS`), then
+  the best reading is used.
+- The user's answers are appended to the question inside the `<question>` block for retrieval, the
+  generator, the judge and the answer step. Assumptions are appended to the final answer.
+- CLI: `python -m app.ask` prompts for the answer (number or free text).
+
 ## 5. The Self-Correction Loop
 
 ### 5.1 Failure taxonomy
@@ -347,7 +361,7 @@ All LLM calls go through one function, `app.llm.client.call(group, messages, sch
   out. ID-like and year columns are excluded from statistics. Never the full result.
 - `compose_answer` is instructed to use **only numbers present in the result payload**.
 - **Refusals**: `generate_sql` may return an empty `sql` with an explanation (e.g. for "delete all
-  payments"). The pipeline reports this as `declined`; M5 moves it up front into `understand_question`.
+  payments"). The pipeline reports this as `declined`; since M5, `understand_question` catches most such requests first (outcome `out_of_scope`) and `declined` remains the backstop.
 
 ## 9. Streamlit UI
 
@@ -484,7 +498,7 @@ text-to-sql-bot/
 | M2 | **Single-shot pipeline** ✅ | LiteLLM Router (Groq→Gemini, rpm/tpm limits, verified fallback); schema catalog rendered as DDL from what `bot_reader` can see; `python -m app.ask` runs question → SQL → safety → execute → answer using the full schema |
 | M3 | **Agentic loop + eval harness** ✅ | LangGraph graph with deterministic validation + LLM judge, feedback, dedupe, 3 attempts, best-effort/give-up; 40-question eval set with verified gold SQL; first numbers (single-shot vs self-correcting) in Section 10 |
 | M4 | **Retrieval** ✅ | Descriptions + glossary, inferred FKs, both embedders + pgvector index, hybrid ranking, value index, glossary linking, join paths; retrieval comparison; local embedder chosen; held-out question set (Section 10) |
-| M5 | **Clarification** | Ambiguous and out-of-scope handling with `interrupt()` |
+| M5 | **Clarification** ✅ | Ambiguous and out-of-scope handling with `interrupt()` |
 | M6 | **Streamlit UI** | Chat, table, SQL, trace, charts, sidebar settings |
 | M7 | **Bring your own data (full)** | CSV/Excel upload, upload wizard in the UI (dumps reuse the M1 loader), relationship confirmation, auto descriptions, dataset selector (Section 15) |
 | M8 | **Polish** | LangSmith on; README with architecture diagram, eval metrics, demo GIF |

@@ -114,7 +114,7 @@ def score_question(q: dict, dataset: str, db_name: str, max_attempts: int,
     start = time.perf_counter()
     try:
         def run():
-            return run_agent(q["question"], dataset, max_attempts=max_attempts, compose=False,
+            return run_agent(q["question"], dataset, max_attempts=max_attempts, compose=False, understand=False,
                              retrieval=retrieval)
         r = run()
         if r.outcome == "llm_error":  # provider limits: wait for the minute window, retry once
